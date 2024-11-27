@@ -1,0 +1,35 @@
+category,feature_name,concept_name,concept_id
+Lab values,Potassium,Potassium [Moles/volume] in Serum or Plasma,3023103
+Lab values,Potassium,Potassium [Moles/volume] in Blood,3005456
+Lab values,Sodium,Sodium [Moles/volume] in Serum or Plasma,3019550
+Lab values,Sodium,Sodium [Moles/volume] in Blood,3000285
+Lab values,Chloride,Chloride [Moles/volume] in Blood,3018572
+Lab values,Chloride,Chloride [Moles/volume] in Serum or Plasma,3014576
+Lab values,Glucose,Glucose [Moles/volume] in Blood,3020491
+Lab values,Urea,Urea [Moles/volume] in Blood,43534077
+Lab values,Creatinine,Creatinine [Moles/volume] in Serum or Plasma,3020564
+Lab values,Magnesium,Magnesium [Moles/volume] in Serum or Plasma,3012095
+Lab values,Magnesium,Magnesium [Moles/volume] in Blood,3033836
+Lab values,Calcium.ionized,Calcium.ionized [Moles/volume] adjusted to pH 7.4 in Blood,3048816
+Lab values,Calcium,Calcium [Moles/volume] in Serum or Plasma,3015377
+Lab values,_,Carbon dioxide production (VCO2) in Respiratory system,21490580
+Lab values,_,Carbon dioxide [Partial pressure] in Exhaled gas --at end expiration,3035357
+Lab values,Carbon dioxide,Carbon dioxide [Partial pressure] in Blood,3013290
+Lab values,Aspartate aminotransferase,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,3013721
+Lab values,Alanine aminotransferase,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,3006923
+Lab values,Bilirubin.total,Bilirubin.total [Moles/volume] in Serum or Plasma,3006140
+Lab values,Bilirubin.total,Bilirubin.total [Moles/volume] in Blood,40757494
+Lab values,Albumin,Albumin [Mass/volume] in Serum or Plasma,3024561
+Lab values,Hemoglobin,Hemoglobin [Moles/volume] in Blood,40762351
+Lab values,Leukocytes,Leukocytes [#/volume] in Blood,3010813
+Lab values,Platelets,Platelets [#/volume] in Blood,3007461
+Lab values,aPTT,aPTT in Blood by Coagulation assay,3013466
+Lab values,PT,Prothrombin time (PT),3034426
+Lab values,INR,INR in Blood by Coagulation assay,3032080
+Lab values,pH Blood,pH of Blood,3010421
+Lab values,PaOxygen,Oxygen [Partial pressure] in Blood,3027315
+Lab values,Base excess,Base excess in Blood by calculation,3012501
+Lab values,Bicarbonate,Bicarbonate [Moles/volume] in Blood,3006576
+Lab values,Lactate,Lactate [Moles/volume] in Blood,3047181
+Lab values,Lactate,Lactate [Moles/volume] in Serum or Plasma,3014111
+Lab values,FiO2,Oxygen/Inspired gas Respiratory system by O2 Analyzer --on ventilator,3025408
