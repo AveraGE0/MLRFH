@@ -33,3 +33,6 @@ Lab values,Bicarbonate,Bicarbonate [Moles/volume] in Blood,3006576
 Lab values,Lactate,Lactate [Moles/volume] in Blood,3047181
 Lab values,Lactate,Lactate [Moles/volume] in Serum or Plasma,3014111
 Lab values,FiO2,Oxygen/Inspired gas Respiratory system by O2 Analyzer --on ventilator,3025408
+MedsnFluids,Urine,Urine output,3014315
+MedsnFluids,Urine,Urine output --post void,3007123
+MedsnFluids,Urine,Urine output measured by nephrostomy,21491173
