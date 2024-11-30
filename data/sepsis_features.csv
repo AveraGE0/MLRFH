@@ -36,3 +36,7 @@ Lab values,FiO2,Oxygen/Inspired gas Respiratory system by O2 Analyzer --on venti
 MedsnFluids,Urine,Urine output,3014315
 MedsnFluids,Urine,Urine output --post void,3007123
 MedsnFluids,Urine,Urine output measured by nephrostomy,21491173
+Demographics,Weight,Body weight Estimated,3026600
+Demographics,Weight,Body weight Measured,3013762
+Demographics,Weight,Body weight Stated,3023166
+Demographics,Weight,Body weight,3025315
