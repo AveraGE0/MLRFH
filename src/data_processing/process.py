@@ -7,12 +7,20 @@ import os
 import pandas as pd
 import pandas_gbq as pd_gbq
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import boxcox, skew
+from tqdm import tqdm
 
 from google.cloud.bigquery.client import Client
 from google.cloud import bigquery
 
-from src.data_processing.queries.combined_diagnosis import combined_diagnosis_query
+from src.data_processing.queries.combined_diagnosis import combined_diagnoses_query
 from src.data_processing.queries.sofa_scores import *
+from src.data_processing.queries.data_queries import query_demographics, query_measurement
+from src.data_processing.missing_data import plot_missing_data
+
+tqdm.pandas()
 
 
 def get_sofa_resp(df_sofa_resp):
@@ -28,8 +36,8 @@ def get_sofa_resp(df_sofa_resp):
     df_sofa_resp['pao2'] = df_sofa_resp['pao2'].astype(float)
     df_sofa_resp['fio2'] = df_sofa_resp['fio2'].astype(float)
     df_sofa_resp.loc[df_sofa_resp['pao2'] < 50, 'pao2'] = np.nan
-    df_sofa_resp =df_sofa_resp.dropna(subset=['pao2'])
-    df_sofa_resp.loc[:,'pf_ratio'] =df_sofa_resp['pao2']/df_sofa_resp['fio2']
+    df_sofa_resp = df_sofa_resp.dropna(subset=['pao2']).copy()
+    df_sofa_resp['pf_ratio'] = df_sofa_resp['pao2'] / df_sofa_resp['fio2']
 
     #calculate SOFA respiration score:
     df_sofa_resp.loc[:,'sofa_respiration_score'] = 0
@@ -250,6 +258,107 @@ def get_sofa_creatinine(df_creatinine):
     return sofa_renal_creatinine
 
 
+def drop_outliers(df_data):
+    """Removed outliers from all features, that are outside of the
+    1.5 * IQR range.
+    Args:
+        df_data (_type_): dataframe with the data.
+
+    Returns:
+        _type_: _description_
+    """
+    for concept in df_data['concept_name'].unique():
+        # Select data for the current concept
+        feature_values = np.array(df_data[df_data['concept_name'] == concept]['value_as_number']\
+            .dropna()\
+            .astype(float)\
+            .tolist()
+        )
+        Q1 = np.percentile(feature_values, 25)  # 25th percentile
+        Q3 = np.percentile(feature_values, 75)  # 75th percentile
+        IQR = Q3 - Q1
+
+        # Define bounds
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+
+        # Filter data to remove outliers
+        return df_data[
+            (df_data["value_as_number"] >= lower_bound) &
+            (df_data["value_as_number"] <= upper_bound)
+        ]
+
+def standardize_data(df_data_wide):
+    numeric_features = df_data_wide.select_dtypes(include=['number']).columns.tolist()
+    df_data_wide[numeric_features] = df_data_wide[numeric_features].apply(lambda x: (x - x.mean()) / x.std(), axis=0)
+    return df_data_wide
+
+
+def get_windowed_data(df_data, time_window: str='12h'):
+    def process_group(group_data):
+        group_data = group_data.set_index("measurement_datetime")
+        df_resampled = group_data.resample(time_window).mean() #CHANGE TIME WINDOW
+
+        return df_resampled
+
+    df_data_grouped = df_data.groupby(["visit_occurrence_id"])
+    df_data_windowed = df_data_grouped.progress_apply(process_group)
+
+    df_data_windowed = df_data_windowed.drop(columns=["visit_occurrence_id"]).reset_index()
+    print(df_data_windowed.columns)
+    df_data_windowed["seq_id"] = df_data_windowed.groupby(["visit_occurrence_id"]).cumcount()
+
+    df_data_windowed = df_data_windowed.reset_index()
+    df_data_windowed = df_data_windowed.set_index(["visit_occurrence_id", "measurement_datetime"])
+    return df_data_windowed  
+
+
+
+def transform_data(df_data_wide: pd.DataFrame):
+    """Performs a box-cox transformation of the data.
+
+    Args:
+        df_data_wide (pd.DataFrame): input data frame.
+    """
+    numeric_column = df_data_wide.select_dtypes(include=['number']).columns.tolist()
+    # Iterate over features and apply Box-Cox transformation
+    for feature in numeric_column:
+        valid_values = df_data_wide[feature].dropna()  # Exclude NaNs for Box-Cox
+        transformed, _ = boxcox(
+            valid_values + ((abs(valid_values.min()) + 1) if valid_values.min() <= 0 else 0)
+        )
+        
+        if abs(skew(df_data_wide[feature].dropna().tolist())) > abs(skew(transformed)):
+            df_data_wide.loc[valid_values.index, feature] = transformed
+    return df_data_wide
+
+
+def get_wide_measurements(df_measurements_long):
+    ## Ensure all columns are available in the data
+    # specifically drop concept_id and concept_name
+    columns_to_keep = ["visit_occurrence_id", "measurement_datetime", "feature_name", "value_as_number", "year_of_birth", "gender_source_value"]
+    df_measurements_long = df_measurements_long[columns_to_keep]
+
+    # Sort the data by "measurement_datetime"
+    df_measurements_long = df_measurements_long.sort_values(by="measurement_datetime")
+
+    # Group the data to average duplicate measurements (preserve non-grouping columns)
+    df_measurements_long = df_measurements_long.groupby(
+        ["visit_occurrence_id", "measurement_datetime", "feature_name", "gender_source_value", "year_of_birth"],
+        as_index=False
+    ).mean(numeric_only=True)
+
+    # Pivot the data to wide format
+    df_measurements_wide = df_measurements_long.pivot(
+        index=["visit_occurrence_id", "measurement_datetime", "gender_source_value", "year_of_birth"],
+        columns="feature_name",
+        values="value_as_number"
+    )
+
+    # Reset the index to make it a flat DataFrame
+    return df_measurements_wide.reset_index()
+
+
 if __name__ == '__main__':
     ### ------------------- Project setup with Google Cloud + Bigquery ------------------- ###
     # Follow tutorial to setup: https://cloud.google.com/iam/docs/keys-create-delete#python
@@ -275,7 +384,7 @@ if __name__ == '__main__':
 
     ### ------------------------------- SETUP Done ------------------------------- ###
     ### -------------------------------------------------------------------------- ###
-    df_admissions = pd_gbq.read_gbq(combined_diagnosis_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials)
+    df_admissions = pd_gbq.read_gbq(combined_diagnoses_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials)
     df_combined_diagnoses = pd_gbq.read_gbq(combined_diagnoses_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials)
     
     
@@ -341,7 +450,7 @@ if __name__ == '__main__':
     total_scores = sofa.set_index('visit_occurrence_id').sum(axis=1, skipna=True).to_frame('sofa_total_score')
     df_sofa = pd.merge(sofa, total_scores, on='visit_occurrence_id', how='left')
 
-    df_combined_diagnoses = pd.merge(df_combined_diagnoses, sofa, on='visit_occurrence_id', how='inner')
+    df_combined_diagnoses = pd.merge(df_combined_diagnoses, df_sofa, on='visit_occurrence_id', how='inner')
     df_sepsis_at_admission = df_combined_diagnoses[(
         (df_combined_diagnoses['sepsis_at_admission'] == 1) |
         (
@@ -352,8 +461,111 @@ if __name__ == '__main__':
     )]
 
     print("INFO: ")
-    print(f"Unique persons: {df_sepsis_at_admission['person_id'].unique()}")
-    print(f"Unique admissions: {df_sepsis_at_admission['visit_occurrence_id'].unique()}")
+    print(f"Unique persons: {len(df_sepsis_at_admission['person_id'].unique())}")
+    print(f"Unique admissions: {len(df_sepsis_at_admission['visit_occurrence_id'].unique())}")
+
+    sepsis_cases = df_sepsis_at_admission[["visit_occurrence_id", "person_id"]]
+    sepsis_persons = tuple(sepsis_cases["person_id"].tolist())
+    ### ------------------------- Training Data Processing ------------------------- ###
+    sepsis_features = pd.read_csv("./data/sepsis_features.csv")
+    sepsis_features = sepsis_features[sepsis_features["feature_name"] != "_"]
+    print(f"Unique features being loaded {sepsis_features['feature_name'].unique()}")
+    concept_ids = tuple(sepsis_features["concept_id"].tolist())
 
 
-    print(df_sofa.head(10))
+    df_demographics_wide = pd_gbq.read_gbq(
+        query_demographics.format(person_ids=sepsis_persons),
+        project_id=PROJECT_ID,
+        configuration=config_gbq,
+        use_bqstorage_api=True,
+        credentials=bq_client._credentials
+    )
+    df_demographics_wide.loc[
+        df_demographics_wide['gender_source_value'].str.contains('Man', case=False, na=False),
+        'gender_source_value'
+    ] = 1
+    df_demographics_wide.loc[
+        df_demographics_wide['gender_source_value'].str.contains('Vrouw', case=False, na=False),
+        'gender_source_value'
+    ] = 0
+
+    mq = query_measurement.format(person_ids=sepsis_persons, concept_ids=concept_ids)
+    df_measurements_long = pd_gbq.read_gbq(  # This includes all lab values and the body weight
+        mq,
+        project_id=PROJECT_ID,
+        configuration=config_gbq,
+        use_bqstorage_api=True,
+        credentials=bq_client._credentials
+    )
+    
+    df_measurements_long = pd.merge(
+        df_measurements_long, 
+        df_demographics_wide,
+        on="person_id",
+        how="left"
+    )
+    print(f"Cols with dem: {df_measurements_long.columns}")
+
+    #df_measurements_long["value_as_number"] = df_measurements_long["value_as_number"].astype(float)
+    df_measurements_long["measurement_datetime"] = pd.to_datetime(df_measurements_long["measurement_datetime"])
+    df_measurements_long["value_as_number"] = pd.to_numeric(df_measurements_long["value_as_number"], errors="coerce")
+    # Add feature names
+    df_measurements_long = pd.merge(
+        df_measurements_long,
+        sepsis_features[["feature_name","concept_id"]],
+        left_on='measurement_concept_id',
+        right_on="concept_id",
+        how='left'
+    )
+
+    n_before = len(df_measurements_long)
+    df_measurements_long = drop_outliers(df_measurements_long)
+    print(f"Dropped {n_before-len(df_measurements_long)} outliers.")
+    print(f"{len(df_measurements_long)} values are still present.")
+
+    index_long = df_measurements_long.head(10).index
+    df_measurements_wide = get_wide_measurements(df_measurements_long)
+    print(f"Index before: {index_long}, after: {df_measurements_wide.head(10).index}")
+    print(df_measurements_wide.head(5))
+    print(df_measurements_wide.columns)
+
+    # df_demographics_wide = pd.merge(
+    #     df_sepsis_at_admission,
+    #     df_demographics_wide
+    #     how="left",
+    #     on="person_id"
+    # )[["visit_occurrent_id", "gender_source_value", "year_of_birth"]]
+    # df_sepsis_data_wide = pd.merge(
+    #     df_measurements_wide,
+    #     df_demographics_wide,
+    #     how="left",
+    #     on="visit_occurrent_id")
+
+    ### -------------------- Merge Additional Columns Here ------------------------ ###
+    ## Add sofa cns score
+    df_sepsis = df_measurements_wide.merge(
+        df_sepsis_at_admission[["visit_occurrence_id", "sofa_cns_score"]],
+        on=["visit_occurrence_id"],
+        how="left"
+    )
+
+    df_sepsis['gender_source_value'] = pd.to_numeric(df_sepsis['gender_source_value'], errors='coerce')
+
+    # Aggregate values to 4h values
+    df_sepsis_windows = get_windowed_data(df_sepsis)
+    result_non_na_cells = df_sepsis_windows.count().sum()
+    print(f"dataset has {result_non_na_cells} non-na entries!")
+
+    # Transforming data with box-cox
+    df_more_normal = transform_data(df_sepsis_windows)
+    
+    # Standardizing data for imputation and clustering
+    df_standardized = standardize_data(df_more_normal)
+
+    print(df_standardized.describe())
+    plot_missing_data(df_standardized, imputation_type="No imputation").save("./figures/initial_missing_data.png")
+    
+    # imputation
+
+    
+    # Clustering
