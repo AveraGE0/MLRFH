@@ -1,0 +1,40 @@
+category,feature_name,concept_id
+Vital_signs,Heart Rate,3027018
+Vital_signs,Systolic Blood Pressure,21490853
+Vital_signs,Mean Blood Pressure,21490852
+Vital_signs,Diastolic blood pressure,21490851
+Vital_signs,Respiratory rate,3024171
+Vital_signs,SpO2,40762499
+Vital_signs,Blood Temperature,21490586
+Lab_values,Potassium [Moles/volume] in Serum or Plasma,3023103
+Lab_values,Potassium [Moles/volume] in Blood,3005456
+Lab_values,Sodium [Moles/volume] in Serum or Plasma,3019550
+Lab_values,Sodium [Moles/volume] in Blood,3000285
+Lab_values,Chloride [Moles/volume] in Blood,3018572
+Lab_values,Chloride [Moles/volume] in Serum or Plasma,3014576
+Lab_values,Glucose [Moles/volume] in Blood,3020491
+Lab_values,Urea [Moles/volume] in Blood,43534077
+Lab_values,Creatinine [Moles/volume] in Serum or Plasma,3020564
+Lab_values,Magnesium [Moles/volume] in Serum or Plasma,3012095
+Lab_values,Magnesium [Moles/volume] in Blood,3033836
+Lab_values,Calcium.ionized [Moles/volume] adjusted to pH 7.4 in Blood,3048816
+Lab_values,Calcium [Moles/volume] in Serum or Plasma,3015377
+Lab_values,Carbon dioxide production (VCO2) in Respiratory system,21490580
+Lab_values,Carbon dioxide [Partial pressure] in Exhaled gas --at end expiration,3035357
+Lab_values,Carbon dioxide [Partial pressure] in Blood,3013290
+Lab_values,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,3013721
+Lab_values,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,3006923
+Lab_values,Bilirubin.total [Moles/volume] in Serum or Plasma,3006140
+Lab_values,Albumin [Mass/volume] in Serum or Plasma,3024561
+Lab_values,Hemoglobin [Moles/volume] in Blood,40762351
+Lab_values,Leukocytes [#/volume] in Blood,3010813
+Lab_values,Platelets [#/volume] in Blood,3007461
+Lab_values,aPTT in Blood by Coagulation assay,3013466
+Lab_values,Prothrombin time (PT),3034426
+Lab_values,INR in Blood by Coagulation assay,3032080
+Lab_values,pH of Blood,3010421
+Lab_values,Oxygen [Partial pressure] in Blood,3027315
+Lab_values,Carbon dioxide [Partial pressure] in Blood,3013290
+Lab_values,Base excess in Blood by calculation,3012501
+Lab_values,Bicarbonate [Moles/volume] in Blood,3006576
+Lab_values,Lactate [Moles/volume] in Blood,3047181
