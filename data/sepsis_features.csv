@@ -7,6 +7,7 @@ Vital_signs,Respiratory rate,Respiratory rate,3024171
 Vital_signs,SpO2,Oxygen saturation in Arterial blood by Pulse oximetry,40762499
 Vital_signs,Temperature,Rectal temperature,3022060
 Vital_signs,Temperature,Blood temperature,21490586
+Vital_signs,Temperature,Esophageal temperature,21490588
 Lab values,Potassium,Potassium [Moles/volume] in Serum or Plasma,3023103
 Lab values,Potassium,Potassium [Moles/volume] in Blood,3005456
 Lab values,Sodium,Sodium [Moles/volume] in Serum or Plasma,3019550

@@ -50,7 +50,7 @@ LEFT JOIN concept c
     ON m.measurement_concept_id = c.concept_id
 WHERE
     m.person_id IN {person_ids}
-    AND m.provider_id BETWEEN 27 AND 61
+    AND (m.provider_id BETWEEN 27 AND 61 OR m.provider_id IS NULL)
     AND c.concept_id IN {concept_ids}
 GROUP BY
     m.person_id,

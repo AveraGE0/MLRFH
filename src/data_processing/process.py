@@ -18,7 +18,7 @@ from google.cloud import bigquery
 from src.data_processing.queries.combined_diagnosis import combined_diagnoses_query
 from src.data_processing.queries.sofa_scores import *
 from src.data_processing.queries.data_queries import query_demographics, query_measurement
-from src.data_processing.missing_data import plot_missing_data
+from src.data_processing.missing_data import plot_missing_data, calculate_average_nans, drop_na_cols
 
 tqdm.pandas()
 
@@ -267,9 +267,10 @@ def drop_outliers(df_data):
     Returns:
         _type_: _description_
     """
-    for concept in df_data['concept_name'].unique():
+    columns = df_data['feature_name'].unique()
+    for feature in tqdm(columns, desc=f"processing f{len(columns)} features"):
         # Select data for the current concept
-        feature_values = np.array(df_data[df_data['concept_name'] == concept]['value_as_number']\
+        feature_values = np.array(df_data[df_data['feature_name'] == feature]['value_as_number']\
             .dropna()\
             .astype(float)\
             .tolist()
@@ -283,10 +284,14 @@ def drop_outliers(df_data):
         upper_bound = Q3 + 1.5 * IQR
 
         # Filter data to remove outliers
-        return df_data[
-            (df_data["value_as_number"] >= lower_bound) &
-            (df_data["value_as_number"] <= upper_bound)
+        df_data = df_data[
+            (df_data['feature_name'] != feature) |
+            (
+                (df_data["value_as_number"] >= lower_bound) &
+                (df_data["value_as_number"] <= upper_bound)
+            )
         ]
+    return df_data
 
 def standardize_data(df_data_wide):
     numeric_features = df_data_wide.select_dtypes(include=['number']).columns.tolist()
@@ -327,8 +332,9 @@ def transform_data(df_data_wide: pd.DataFrame):
         transformed, _ = boxcox(
             valid_values + ((abs(valid_values.min()) + 1) if valid_values.min() <= 0 else 0)
         )
-        
+        print("transforming", feature)
         if abs(skew(df_data_wide[feature].dropna().tolist())) > abs(skew(transformed)):
+            
             df_data_wide.loc[valid_values.index, feature] = transformed
     return df_data_wide
 
@@ -499,7 +505,7 @@ if __name__ == '__main__':
     )
     
     df_measurements_long = pd.merge(
-        df_measurements_long, 
+        df_measurements_long,
         df_demographics_wide,
         on="person_id",
         how="left"
@@ -518,10 +524,13 @@ if __name__ == '__main__':
         how='left'
     )
 
-    n_before = len(df_measurements_long)
+    print(f"Measurements for temp: {len(df_measurements_long[df_measurements_long['feature_name'] == 'Temperature'])}")
+
+    n_before = df_measurements_long.count().sum()
+    print(f"Datapoints before: {df_measurements_long.count().sum()}")
     df_measurements_long = drop_outliers(df_measurements_long)
-    print(f"Dropped {n_before-len(df_measurements_long)} outliers.")
-    print(f"{len(df_measurements_long)} values are still present.")
+    print(f"Dropped {n_before-df_measurements_long.count().sum()} outliers.")
+    print(f"{df_measurements_long.count().sum()} values are still present.")
 
     index_long = df_measurements_long.head(10).index
     df_measurements_wide = get_wide_measurements(df_measurements_long)
@@ -562,8 +571,19 @@ if __name__ == '__main__':
     # Standardizing data for imputation and clustering
     df_standardized = standardize_data(df_more_normal)
 
+    # plot some stuff
     print(df_standardized.describe())
-    plot_missing_data(df_standardized, imputation_type="No imputation").save("./figures/initial_missing_data.png")
+    plot_missing_data(df_standardized, imputation_type="No imputation").savefig("./figures/initial_missing_data.png")
+    # Apply the function to each column in the DataFrame (excluding metadata columns)
+    df_standardized = df_standardized.sort_index()
+    df_average_nans = pd.DataFrame(
+        df_standardized.iloc[:, 6:].apply(calculate_average_nans, axis=0),  # Adjust slice as needed for features
+        columns=["average_nans"]
+    )
+    # Convert the result into a DataFrame for clarity
+    df_average_nans.to_csv("./figures/feature_gaps_size.csv")
+    
+    df_standardized = drop_na_cols(df_standardized, threshold=0.3)
     
     # imputation
 
