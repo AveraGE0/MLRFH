@@ -523,7 +523,7 @@ def process_data():
     index_long = df_measurements_long.head(10).index
     df_measurements_wide = get_wide_measurements(df_measurements_long)
     print(f"Index before: {index_long}, after: {df_measurements_wide.head(10).index}")
-    print(f"Wide temp dps: {df_measurements_wide["Temperature"].notna().sum()}")
+    print(f"Wide temp dps: {df_measurements_wide['Temperature'].notna().sum()}")
     print(df_measurements_wide.head(5))
     print(df_measurements_wide.columns)
 
