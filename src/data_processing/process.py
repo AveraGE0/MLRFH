@@ -368,43 +368,47 @@ def get_wide_measurements(df_measurements_long):
     return df_measurements_wide.reset_index()
 
 
-def process_data(PROJECT_ID, config_gbq, local=False):
+def process_data(PROJECT_ID, config_gbq, bq_client=None):
+    if not bq_client is None:
+        credentials = bq_client._credentials
+    else:
+        credentials = None
     ### ------------------------------- SETUP Done ------------------------------- ###
     ### -------------------------------------------------------------------------- ###
-    df_admissions = pd_gbq.read_gbq(combined_diagnoses_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
-    df_combined_diagnoses = pd_gbq.read_gbq(combined_diagnoses_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_admissions = pd_gbq.read_gbq(combined_diagnoses_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
+    df_combined_diagnoses = pd_gbq.read_gbq(combined_diagnoses_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     
     
-    df_sofa_resp = pd_gbq.read_gbq(query_sofa_respiratory, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_sofa_resp = pd_gbq.read_gbq(query_sofa_respiratory, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_sofa_resp, df_fio2_cleaned, df_pao2_cleaned = get_sofa_resp(df_sofa_resp)
     
     
-    df_sofa_coagulation = pd_gbq.read_gbq(query_sofa_coagulation, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_sofa_coagulation = pd_gbq.read_gbq(query_sofa_coagulation, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_sofa_coagulation = get_sofa_coagulation(df_sofa_coagulation)
 
 
-    df_sofa_liver = pd_gbq.read_gbq(query_sofa_liver, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_sofa_liver = pd_gbq.read_gbq(query_sofa_liver, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_sofa_liver = get_sofa_liver(df_sofa_liver)
 
-    df_sofa_cardiovascular_meds = pd_gbq.read_gbq(query_vasopressors_ionotropes, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_sofa_cardiovascular_meds = pd_gbq.read_gbq(query_vasopressors_ionotropes, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_sofa_cardiocascular_meds = get_cardiovascular_meds(df_sofa_cardiovascular_meds)
 
-    df_blood_pressure = pd_gbq.read_gbq(query_blood_pressure, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_blood_pressure = pd_gbq.read_gbq(query_blood_pressure, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_blood_pressure = get_blood_pressure(df_blood_pressure)
 
     #combine the scores from MAP and cardiovascular medication
     df_sofa_cardiovascular = pd.concat([df_blood_pressure, df_sofa_cardiovascular_meds], sort=False).sort_values(by='visit_occurrence_id')
 
 
-    df_sofa_cns = pd_gbq.read_gbq(query_sofa_cns, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_sofa_cns = pd_gbq.read_gbq(query_sofa_cns, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_sofa_cns = get_sofa_cns(df_sofa_cns)
 
 
-    df_sofa_renal = pd_gbq.read_gbq(query_sofa_renal, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_sofa_renal = pd_gbq.read_gbq(query_sofa_renal, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_sofa_renal = get_sofa_renal(df_sofa_renal)
 
 
-    df_sofa_creatinine = pd_gbq.read_gbq(query_sofa_creatinine, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
+    df_sofa_creatinine = pd_gbq.read_gbq(query_sofa_creatinine, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_sofa_creatinine = get_sofa_creatinine(df_sofa_creatinine)
 
     sofa_renal = pd.concat([df_sofa_creatinine, df_sofa_renal], sort=False).sort_values(by='visit_occurrence_id')
@@ -471,7 +475,7 @@ def process_data(PROJECT_ID, config_gbq, local=False):
         project_id=PROJECT_ID,
         configuration=config_gbq,
         use_bqstorage_api=True,
-        credentials=bq_client._credentials if local else None
+        credentials=credentials
     )
     df_demographics_wide.loc[
         df_demographics_wide['gender_source_value'].str.contains('Man', case=False, na=False),
@@ -489,7 +493,7 @@ def process_data(PROJECT_ID, config_gbq, local=False):
         project_id=PROJECT_ID,
         configuration=config_gbq,
         use_bqstorage_api=True,
-        credentials=bq_client._credentials if local else None
+        credentials=credentials
     )
     
     df_measurements_long = pd.merge(
@@ -652,7 +656,7 @@ if __name__ == '__main__':
         }
     }
 
-    df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test = process_data(PROJECT_ID, config_gbq, True)
+    df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test = process_data(PROJECT_ID, config_gbq, bq_client, True)
 
     # Display the resulting DataFrame
     print(f"Remaining train missing: {df_filled_knn_interp_train.isna().sum()}")
