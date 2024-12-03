@@ -368,7 +368,7 @@ def get_wide_measurements(df_measurements_long):
     return df_measurements_wide.reset_index()
 
 
-def process_data(PROJECT_ID, local=False):
+def process_data(PROJECT_ID, config_gbq, local=False):
     ### ------------------------------- SETUP Done ------------------------------- ###
     ### -------------------------------------------------------------------------- ###
     df_admissions = pd_gbq.read_gbq(combined_diagnoses_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials if local else None)
@@ -652,7 +652,7 @@ if __name__ == '__main__':
         }
     }
 
-    df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test = process_data(PROJECT_ID, True)
+    df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test = process_data(PROJECT_ID, config_gbq, True)
 
     # Display the resulting DataFrame
     print(f"Remaining train missing: {df_filled_knn_interp_train.isna().sum()}")
