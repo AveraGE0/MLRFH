@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import boxcox, skew
 from tqdm import tqdm
+from sklearn.model_selection import train_test_split
 
 from google.cloud.bigquery.client import Client
 from google.cloud import bigquery
@@ -19,6 +20,8 @@ from src.data_processing.queries.combined_diagnosis import combined_diagnoses_qu
 from src.data_processing.queries.sofa_scores import *
 from src.data_processing.queries.data_queries import query_demographics, query_measurement
 from src.data_processing.missing_data import plot_missing_data, calculate_average_nans, drop_na_cols
+from src.data_processing.data_imputation import calculate_average_nans, knn_impute_by_column, forward_fill_by_column, forward_fill_limited, drop_features_with_missing_data
+from src.clustering import cluster_kmpp, evaluate_clustering
 
 tqdm.pandas()
 
@@ -365,29 +368,7 @@ def get_wide_measurements(df_measurements_long):
     return df_measurements_wide.reset_index()
 
 
-if __name__ == '__main__':
-    ### ------------------- Project setup with Google Cloud + Bigquery ------------------- ###
-    # Follow tutorial to setup: https://cloud.google.com/iam/docs/keys-create-delete#python
-    
-    PROJECT_ID = "mrih-440308" # REPLACE IF RUN LOCALLY!!
-    DATASET_PROJECT_ID = 'amsterdamumcdb'
-    DATASET_ID = 'version1_5_0'
-    LOCATION = 'eu'
-
-    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/home/m/.config/gcloud/application_default_credentials.json'
-    bq_client = Client(location=LOCATION)
-    print('Authenticated! :)')
-
-    config_gbq = {
-        'query': {
-            'defaultDataset': {
-                "datasetId": DATASET_ID,
-                "projectId": DATASET_PROJECT_ID
-            },
-            'Location': LOCATION
-        }
-    }
-
+def process_data():
     ### ------------------------------- SETUP Done ------------------------------- ###
     ### -------------------------------------------------------------------------- ###
     df_admissions = pd_gbq.read_gbq(combined_diagnoses_query, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=bq_client._credentials)
@@ -477,6 +458,12 @@ if __name__ == '__main__':
     sepsis_features = sepsis_features[sepsis_features["feature_name"] != "_"]
     print(f"Unique features being loaded {sepsis_features['feature_name'].unique()}")
     concept_ids = tuple(sepsis_features["concept_id"].tolist())
+    weight_temp_concept_ids = tuple(
+        sepsis_features[
+            (sepsis_features["feature_name"] == "Temperature") |\
+            (sepsis_features["feature_name"] == "Weight")
+        ]["concept_id"].tolist()
+    )
 
 
     df_demographics_wide = pd_gbq.read_gbq(
@@ -495,7 +482,8 @@ if __name__ == '__main__':
         'gender_source_value'
     ] = 0
 
-    mq = query_measurement.format(person_ids=sepsis_persons, concept_ids=concept_ids)
+    mq = query_measurement.format(person_ids=sepsis_persons, weight_temp_ids=weight_temp_concept_ids, concept_ids=concept_ids)
+    print(mq)
     df_measurements_long = pd_gbq.read_gbq(  # This includes all lab values and the body weight
         mq,
         project_id=PROJECT_ID,
@@ -535,6 +523,7 @@ if __name__ == '__main__':
     index_long = df_measurements_long.head(10).index
     df_measurements_wide = get_wide_measurements(df_measurements_long)
     print(f"Index before: {index_long}, after: {df_measurements_wide.head(10).index}")
+    print(f"Wide temp dps: {df_measurements_wide["Temperature"].notna().sum()}")
     print(df_measurements_wide.head(5))
     print(df_measurements_wide.columns)
 
@@ -586,6 +575,97 @@ if __name__ == '__main__':
     df_standardized = drop_na_cols(df_standardized, threshold=0.3)
     
     # imputation
+    average_nans_per_column_filtered = df_standardized.iloc[:, :].apply(calculate_average_nans, axis=0)
+
+    # Perform forward fill with the calculated averages
+    # Pass the correct variable 'average_nans_per_column_filtered'
+    df_standardized_filled = forward_fill_by_column(df_standardized, average_nans_per_column_filtered)
+    plot_missing_data(df_standardized_filled, imputation_type="FF imputation").savefig("./figures/ff_missing_data.png")
+
+        
+    # Get unique visit occurrences
+    unique_visits = df_standardized_filled.index.get_level_values("visit_occurrence_id").unique()
+
+    # Split unique visit occurrences into train, validation, and test
+    train_visits, temp_visits = train_test_split(unique_visits, test_size=0.4, random_state=42)  # 60% train
+    valid_visits, test_visits = train_test_split(temp_visits, test_size=0.5, random_state=42)  # 20% validation, 20% test
+
+    # Create train, validation, and test sets based on visit occurrences
+    train_data = df_standardized_filled[df_standardized_filled.index.get_level_values("visit_occurrence_id").isin(train_visits)]
+    valid_data = df_standardized_filled[df_standardized_filled.index.get_level_values("visit_occurrence_id").isin(valid_visits)]
+    test_data = df_standardized_filled[df_standardized_filled.index.get_level_values("visit_occurrence_id").isin(test_visits)]
+
+    print("Train data shape:", train_data.shape)
+    print("Validation data shape:", valid_data.shape)
+    print("Test data shape:", test_data.shape)
+
+    # Define a function to apply KNN imputation for each visit occurrence
+    # Apply the KNN imputation with dynamic k
+    df_knn_imputed_train = knn_impute_by_column(train_data)
+    print('train data done')
+    df_knn_imputed_val = knn_impute_by_column(valid_data)
+    print('validation data done')
+    df_knn_imputed_test = knn_impute_by_column(test_data)
+    print('test data done')
+
+    plot_missing_data(df_knn_imputed_train, 'Train KNN').savefig("./figures/ffknn_train_missing_data.png")
+    plot_missing_data(df_knn_imputed_val, 'Validation KNN').savefig("./figures/ffknn_val_missing_data.png")
+    plot_missing_data(df_knn_imputed_test, 'Test KNN').savefig("./figures/ffknn_test_missing_data.png")
+
+    # Apply the function to each dataset
+    df_knn_imputed_train, dropped_features_train = drop_features_with_missing_data(df_knn_imputed_train, threshold=40)
+    df_knn_imputed_val, dropped_features_val = drop_features_with_missing_data(df_knn_imputed_val, threshold=40)
+    df_knn_imputed_test, dropped_features_test = drop_features_with_missing_data(df_knn_imputed_test, threshold=40)
+
+    # Print the columns dropped in each dataset
+    print("Columns dropped from training data:", dropped_features_train)
+    print("Columns dropped from validation data:", dropped_features_val)
+    print("Columns dropped from test data:", dropped_features_test)
+
+    # Perform linear interpolation on remaining missing values
+    df_filled_knn_interp_train = df_knn_imputed_train.interpolate(method='linear', axis=0, limit_direction='both')
+    df_filled_knn_interp_val = df_knn_imputed_val.interpolate(method='linear', axis=0, limit_direction='both')
+    df_filled_knn_interp_test = df_knn_imputed_test.interpolate(method='linear', axis=0, limit_direction='both')
+    return df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test
+
+
+if __name__ == '__main__':
+    ### ------------------- Project setup with Google Cloud + Bigquery ------------------- ###
+    # Follow tutorial to setup: https://cloud.google.com/iam/docs/keys-create-delete#python
+    
+    PROJECT_ID = "mrih-440308" # REPLACE IF RUN LOCALLY!!
+    DATASET_PROJECT_ID = 'amsterdamumcdb'
+    DATASET_ID = 'version1_5_0'
+    LOCATION = 'eu'
+
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'C:\\Users\\MR\\AppData\\Roaming\\gcloud\\application_default_credentials.json'
+    bq_client = Client(location=LOCATION)
+    print('Authenticated! :)')
+
+    config_gbq = {
+        'query': {
+            'defaultDataset': {
+                "datasetId": DATASET_ID,
+                "projectId": DATASET_PROJECT_ID
+            },
+            'Location': LOCATION
+        }
+    }
 
     
+
+    # Display the resulting DataFrame
+    print(f"Remaining train missing: {df_filled_knn_interp_train.isna().sum()}")
+    print(f"Remaining train missing: {df_filled_knn_interp_val.isna().sum()}")
+    print(f"Remaining train missing: {df_filled_knn_interp_test.isna().sum()}")
+    
     # Clustering
+    kmeans, cluster_centers = cluster_kmpp(df_filled_knn_interp_train, k=200)
+
+    print(cluster_centers)
+    pd.DataFrame({"state": cluster_centers}, index=df_filled_knn_interp_train.index).to_csv("./data/train_centers.csv")
+    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_val.values)}, index=df_filled_knn_interp_val.index).to_csv("./data/val_centers.csv")
+    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_test.values)}, index=df_filled_knn_interp_test.index).to_csv("./data/test_centers.csv")
+
+    res, fig = evaluate_clustering(df_filled_knn_interp_train)
+    fig.savfig("./figures/clustering_eval.png")
