@@ -656,7 +656,7 @@ if __name__ == '__main__':
         }
     }
 
-    df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test = process_data(PROJECT_ID, config_gbq, bq_client, True)
+    df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test = process_data(PROJECT_ID, config_gbq, bq_client)
 
     # Display the resulting DataFrame
     print(f"Remaining train missing: {df_filled_knn_interp_train.isna().sum()}")
@@ -667,9 +667,9 @@ if __name__ == '__main__':
     kmeans, cluster_centers = cluster_kmpp(df_filled_knn_interp_train, k=200)
 
     print(cluster_centers)
-    pd.DataFrame({"state": cluster_centers}, index=df_filled_knn_interp_train.index).to_csv(f"{default_path}/data/train_centers.csv")
-    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_val.values)}, index=df_filled_knn_interp_val.index).to_csv(f"{default_path}/data/val_centers.csv")
-    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_test.values)}, index=df_filled_knn_interp_test.index).to_csv(f"{default_path}/data/test_centers.csv")
+    pd.DataFrame({"state": cluster_centers}, index=df_filled_knn_interp_train.index).to_csv(f"./data/train_centers.csv")
+    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_val.values)}, index=df_filled_knn_interp_val.index).to_csv(f"./data/val_centers.csv")
+    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_test.values)}, index=df_filled_knn_interp_test.index).to_csv(f"./data/test_centers.csv")
 
     res, fig = evaluate_clustering(df_filled_knn_interp_train)
-    fig.savfig(f"{default_path}/figures/clustering_eval.png")
+    fig.savfig(f"./figures/clustering_eval.png")
