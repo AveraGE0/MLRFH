@@ -18,7 +18,7 @@ from google.cloud import bigquery
 
 from src.data_processing.queries.combined_diagnosis import combined_diagnoses_query
 from src.data_processing.queries.sofa_scores import *
-from src.data_processing.queries.data_queries import query_demographics, query_measurement
+from src.data_processing.queries.data_queries import query_demographics, query_measurement, query_ventilation
 from src.data_processing.missing_data import plot_missing_data, calculate_average_nans, drop_na_cols
 from src.data_processing.data_imputation import calculate_average_nans, knn_impute_by_column, forward_fill_by_column, forward_fill_limited, drop_features_with_missing_data
 from src.clustering import cluster_kmpp, evaluate_clustering
@@ -552,6 +552,30 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
     )
 
     df_sepsis['gender_source_value'] = pd.to_numeric(df_sepsis['gender_source_value'], errors='coerce')
+
+    # Add pao2/fio2
+    df_ventilation_wide = pd_gbq.read_gbq(  # This includes all lab values and the body weight
+        query_ventilation.format(person_id=sepsis_persons),
+        project_id=PROJECT_ID,
+        configuration=config_gbq,
+        use_bqstorage_api=True,
+        credentials=credentials
+    )
+    df_ventilation_wide["pao2_fio2_ratio"] = df_ventilation_wide["pao2"].astype(float) / df_ventilation_wide["fio2"].astype(float)
+    df_sepsis = df_sepsis.merge(
+        df_ventilation_wide[
+            [
+                "visit_occurrence_id",
+                "measurement_datetime",
+                "ventilatory_support",
+                "pao2_fio2_ratio",
+                "pao2"
+            ]
+        ],
+        how='outer',
+        on=["visit_occurrence_id", "measurement_datetime"]
+    )
+
 
     # Aggregate values to 4h values
     df_sepsis_windows = get_windowed_data(df_sepsis)
