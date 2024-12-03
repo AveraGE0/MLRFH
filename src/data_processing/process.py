@@ -368,7 +368,7 @@ def get_wide_measurements(df_measurements_long):
     return df_measurements_wide.reset_index()
 
 
-def process_data(PROJECT_ID, config_gbq, bq_client=None):
+def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
     if not bq_client is None:
         credentials = bq_client._credentials
     else:
@@ -458,7 +458,7 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None):
     sepsis_cases = df_sepsis_at_admission[["visit_occurrence_id", "person_id"]]
     sepsis_persons = tuple(sepsis_cases["person_id"].tolist())
     ### ------------------------- Training Data Processing ------------------------- ###
-    sepsis_features = pd.read_csv("./data/sepsis_features.csv")
+    sepsis_features = pd.read_csv(f"{default_path}/data/sepsis_features.csv")
     sepsis_features = sepsis_features[sepsis_features["feature_name"] != "_"]
     print(f"Unique features being loaded {sepsis_features['feature_name'].unique()}")
     concept_ids = tuple(sepsis_features["concept_id"].tolist())
@@ -566,7 +566,7 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None):
 
     # plot some stuff
     print(df_standardized.describe())
-    plot_missing_data(df_standardized, imputation_type="No imputation").savefig("./figures/initial_missing_data.png")
+    plot_missing_data(df_standardized, imputation_type="No imputation").savefig(f"{default_path}/figures/initial_missing_data.png")
     # Apply the function to each column in the DataFrame (excluding metadata columns)
     df_standardized = df_standardized.sort_index()
     df_average_nans = pd.DataFrame(
@@ -574,7 +574,7 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None):
         columns=["average_nans"]
     )
     # Convert the result into a DataFrame for clarity
-    df_average_nans.to_csv("./figures/feature_gaps_size.csv")
+    df_average_nans.to_csv(f"{default_path}/figures/feature_gaps_size.csv")
     
     df_standardized = drop_na_cols(df_standardized, threshold=0.3)
     
@@ -584,7 +584,7 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None):
     # Perform forward fill with the calculated averages
     # Pass the correct variable 'average_nans_per_column_filtered'
     df_standardized_filled = forward_fill_by_column(df_standardized, average_nans_per_column_filtered)
-    plot_missing_data(df_standardized_filled, imputation_type="FF imputation").savefig("./figures/ff_missing_data.png")
+    plot_missing_data(df_standardized_filled, imputation_type="FF imputation").savefig(f"{default_path}/figures/ff_missing_data.png")
 
         
     # Get unique visit occurrences
@@ -612,9 +612,9 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None):
     df_knn_imputed_test = knn_impute_by_column(test_data)
     print('test data done')
 
-    plot_missing_data(df_knn_imputed_train, 'Train KNN').savefig("./figures/ffknn_train_missing_data.png")
-    plot_missing_data(df_knn_imputed_val, 'Validation KNN').savefig("./figures/ffknn_val_missing_data.png")
-    plot_missing_data(df_knn_imputed_test, 'Test KNN').savefig("./figures/ffknn_test_missing_data.png")
+    plot_missing_data(df_knn_imputed_train, 'Train KNN').savefig(f"{default_path}/figures/ffknn_train_missing_data.png")
+    plot_missing_data(df_knn_imputed_val, 'Validation KNN').savefig(f"{default_path}/figures/ffknn_val_missing_data.png")
+    plot_missing_data(df_knn_imputed_test, 'Test KNN').savefig(f"{default_path}/figures/ffknn_test_missing_data.png")
 
     # Apply the function to each dataset
     df_knn_imputed_train, dropped_features_train = drop_features_with_missing_data(df_knn_imputed_train, threshold=40)
@@ -667,9 +667,9 @@ if __name__ == '__main__':
     kmeans, cluster_centers = cluster_kmpp(df_filled_knn_interp_train, k=200)
 
     print(cluster_centers)
-    pd.DataFrame({"state": cluster_centers}, index=df_filled_knn_interp_train.index).to_csv("./data/train_centers.csv")
-    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_val.values)}, index=df_filled_knn_interp_val.index).to_csv("./data/val_centers.csv")
-    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_test.values)}, index=df_filled_knn_interp_test.index).to_csv("./data/test_centers.csv")
+    pd.DataFrame({"state": cluster_centers}, index=df_filled_knn_interp_train.index).to_csv(f"{default_path}/data/train_centers.csv")
+    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_val.values)}, index=df_filled_knn_interp_val.index).to_csv(f"{default_path}/data/val_centers.csv")
+    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_test.values)}, index=df_filled_knn_interp_test.index).to_csv(f"{default_path}/data/test_centers.csv")
 
     res, fig = evaluate_clustering(df_filled_knn_interp_train)
-    fig.savfig("./figures/clustering_eval.png")
+    fig.savfig(f"{default_path}/figures/clustering_eval.png")
