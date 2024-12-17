@@ -20,10 +20,49 @@ from src.data_processing.queries.combined_diagnosis import combined_diagnoses_qu
 from src.data_processing.queries.sofa_scores import *
 from src.data_processing.queries.data_queries import query_demographics, query_measurement, query_ventilation
 from src.data_processing.missing_data import plot_missing_data, calculate_average_nans, drop_na_cols
-from src.data_processing.data_imputation import calculate_average_nans, knn_impute_by_column, forward_fill_by_column, forward_fill_limited, drop_features_with_missing_data
+from src.data_processing.data_imputation import (
+    calculate_average_nans,
+    knn_impute_by_column,
+    forward_fill_by_column,
+    forward_fill_limited,
+    drop_features_with_missing_data
+)
 from src.clustering import cluster_kmpp, evaluate_clustering
+from src.data_processing.outliers import drop_outliers_iqr_long, drop_outliers_iqr_wide
+
+from src.dkm import Autoencoder, DKNLoss, training, DataLoader
+import torch.optim as optim
+import torch
+from torch.utils.data import Dataset, DataLoader
 
 tqdm.pandas()
+
+class AmsICUSepticShock(Dataset):
+        def __init__(self, data, transform=None):
+            """
+            Args:
+                data (pd.DataFrame): Your data in a DataFrame format.
+                transform (callable, optional): Optional transforms to apply to the data.
+            """
+            self.data = data
+            self.transform = transform
+
+        def __len__(self):
+            # Return the number of samples in the dataset
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            # Get the sample at index idx
+            sample = self.data.iloc[idx]
+
+            # Convert sample to a tensor
+            input_data = torch.tensor(sample.values, dtype=torch.float32)
+
+            # Apply transformations if any
+            if self.transform:
+                input_data = self.transform(input_data)
+
+            return input_data
 
 
 def get_sofa_resp(df_sofa_resp):
@@ -31,8 +70,6 @@ def get_sofa_resp(df_sofa_resp):
     df_sofa_resp.loc[(df_sofa_resp['fio2'] > 100), 'fio2'] = np.nan
     #convert FiO2 in % to fraction
     df_sofa_resp.loc[(df_sofa_resp['fio2'] <= 100) & (df_sofa_resp['fio2'] >= 20) , 'fio2'] = df_sofa_resp['fio2']/100
-    fio2_cleaned = df_sofa_resp['fio2'].dropna()
-    pao2_cleaned = df_sofa_resp['pao2'].dropna().astype(float)
     #remove extreme outliers (FiO2) (possible O2 flow?)
     df_sofa_resp.loc[(df_sofa_resp['fio2'] > 1), 'fio2'] = np.nan
     #remove lower outliers, most likely incorrectly labeled as 'arterial' instead of '(mixed/central) venous'
@@ -63,7 +100,7 @@ def get_sofa_resp(df_sofa_resp):
         'sofa_respiration_score'
     ] = 4
 
-    return df_sofa_resp, fio2_cleaned, pao2_cleaned
+    return df_sofa_resp
 
 
 def get_sofa_coagulation(sofa_coagulation):
@@ -208,6 +245,28 @@ def get_sofa_renal(sofa_renal_urine_output):
     return sofa_renal_daily_urine_output
 
 
+def get_initial_septic_shock(df_lactate):
+    #df_lactate.loc[
+    #    (df_lactate['value'] > 20),
+    #    'value'
+    #] = np.nan
+    df_lactate = df_lactate.dropna()
+    #get max lactate over 24 hours
+    df_lactate = df_lactate.groupby(['visit_occurrence_id']).agg(
+        max_lactate=pd.NamedAgg(column='value', aggfunc='max')
+    ).reset_index()
+    # shock for patients
+    df_lactate.loc[:,'septic_shock'] = False
+
+    #urine output < 200 ml/day
+    df_lactate.loc[(
+        ((df_lactate['max_lactate'] > 2.0))),
+        'septic_shock'
+    ] = True
+
+    return df_lactate
+
+
 def get_sofa_creatinine(df_creatinine):
     #looking at the data it's relevatively easy to spot most lab collection errors (i.e. single outliers between relatively
     # normal values
@@ -260,41 +319,6 @@ def get_sofa_creatinine(df_creatinine):
 
     return sofa_renal_creatinine
 
-
-def drop_outliers(df_data):
-    """Removed outliers from all features, that are outside of the
-    1.5 * IQR range.
-    Args:
-        df_data (_type_): dataframe with the data.
-
-    Returns:
-        _type_: _description_
-    """
-    columns = df_data['feature_name'].unique()
-    for feature in tqdm(columns, desc=f"processing f{len(columns)} features"):
-        # Select data for the current concept
-        feature_values = np.array(df_data[df_data['feature_name'] == feature]['value_as_number']\
-            .dropna()\
-            .astype(float)\
-            .tolist()
-        )
-        Q1 = np.percentile(feature_values, 25)  # 25th percentile
-        Q3 = np.percentile(feature_values, 75)  # 75th percentile
-        IQR = Q3 - Q1
-
-        # Define bounds
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-
-        # Filter data to remove outliers
-        df_data = df_data[
-            (df_data['feature_name'] != feature) |
-            (
-                (df_data["value_as_number"] >= lower_bound) &
-                (df_data["value_as_number"] <= upper_bound)
-            )
-        ]
-    return df_data
 
 def standardize_data(df_data_wide):
     numeric_features = df_data_wide.select_dtypes(include=['number']).columns.tolist()
@@ -368,7 +392,18 @@ def get_wide_measurements(df_measurements_long):
     return df_measurements_wide.reset_index()
 
 
-def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
+def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, default_path: str="."):
+    """Function to generate the dataframe for the states. Retrieves all relevant data from the database.
+
+    Args:
+        PROJECT_ID (str): Project id (google cloud).
+        config_gbq (dict): Configuration config for the queries.
+        bq_client (Client, optional): Client. Only has to be given when running as script (not in jupyter). Defaults to None.
+        default_path (str, optional): Default path to the project. Defaults to ".".
+
+    Returns:
+        _type_: _description_
+    """
     if not bq_client is None:
         credentials = bq_client._credentials
     else:
@@ -380,7 +415,7 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
     
     
     df_sofa_resp = pd_gbq.read_gbq(query_sofa_respiratory, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
-    df_sofa_resp, df_fio2_cleaned, df_pao2_cleaned = get_sofa_resp(df_sofa_resp)
+    df_sofa_resp = get_sofa_resp(df_sofa_resp)
     
     
     df_sofa_coagulation = pd_gbq.read_gbq(query_sofa_coagulation, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
@@ -391,7 +426,7 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
     df_sofa_liver = get_sofa_liver(df_sofa_liver)
 
     df_sofa_cardiovascular_meds = pd_gbq.read_gbq(query_vasopressors_ionotropes, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
-    df_sofa_cardiocascular_meds = get_cardiovascular_meds(df_sofa_cardiovascular_meds)
+    df_sofa_cardiovascular_meds = get_cardiovascular_meds(df_sofa_cardiovascular_meds)
 
     df_blood_pressure = pd_gbq.read_gbq(query_blood_pressure, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_blood_pressure = get_blood_pressure(df_blood_pressure)
@@ -411,18 +446,25 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
     df_sofa_creatinine = pd_gbq.read_gbq(query_sofa_creatinine, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
     df_sofa_creatinine = get_sofa_creatinine(df_sofa_creatinine)
 
-    sofa_renal = pd.concat([df_sofa_creatinine, df_sofa_renal], sort=False).sort_values(by='visit_occurrence_id')
+    df_sofa_renal = pd.concat([df_sofa_creatinine, df_sofa_renal], sort=False).sort_values(by='visit_occurrence_id')
+
+    df_septic_shock = pd_gbq.read_gbq(query_lactate_sepsis, project_id=PROJECT_ID, configuration=config_gbq, use_bqstorage_api=True, credentials=credentials)
+    df_septic_shock = get_initial_septic_shock(df_septic_shock)
     ### --- TOTAL SOFA SCORE ---- ###
     #merge the scores
     sofa = df_admissions.reset_index()['visit_occurrence_id']
 
     for df_to_merge, col_name in [
         (df_sofa_resp, "sofa_respiration_score"),
+        (df_sofa_resp, "pf_ratio"),
+        (df_sofa_resp, "fio2"),
+        (df_sofa_resp, "pao2"),
         (df_sofa_coagulation, "sofa_coagulation_score"),
         (df_sofa_liver, "sofa_liver_score"),
         (df_sofa_cardiovascular, "sofa_cardiovascular_score"),
         (df_sofa_cns, "sofa_cns_score"),
         (df_sofa_renal, "sofa_renal_score"),
+        (df_septic_shock, "septic_shock"),
     ]:
         to_merge = df_to_merge\
             .groupby('visit_occurrence_id')[col_name]\
@@ -436,12 +478,14 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
             on='visit_occurrence_id',
             how='left'
         )
-        
+
     #max respiration score
     total_scores = sofa.set_index('visit_occurrence_id').sum(axis=1, skipna=True).to_frame('sofa_total_score')
     df_sofa = pd.merge(sofa, total_scores, on='visit_occurrence_id', how='left')
 
     df_combined_diagnoses = pd.merge(df_combined_diagnoses, df_sofa, on='visit_occurrence_id', how='inner')
+    df_combined_diagnoses.loc[df_combined_diagnoses["septic_shock"].isna(), "septic_shock"] = False
+    
     df_sepsis_at_admission = df_combined_diagnoses[(
         (df_combined_diagnoses['sepsis_at_admission'] == 1) |
         (
@@ -450,18 +494,31 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
             (df_combined_diagnoses['sofa_total_score'] >= 2)
         )
     )]
+    print("INFO: ")
+    print(f"Unique septic persons: {len(df_sepsis_at_admission['person_id'].unique())}")
+    print(f"Unique septic admissions: {len(df_sepsis_at_admission['visit_occurrence_id'].unique())}")
+    # This will be septic shock!!!
+    df_sepsis_at_admission = df_sepsis_at_admission[df_sepsis_at_admission["septic_shock"]==True]
 
     print("INFO: ")
-    print(f"Unique persons: {len(df_sepsis_at_admission['person_id'].unique())}")
-    print(f"Unique admissions: {len(df_sepsis_at_admission['visit_occurrence_id'].unique())}")
+    print(f"Unique septic shock persons: {len(df_sepsis_at_admission['person_id'].unique())}")
+    print(f"Unique septic shock admissions: {len(df_sepsis_at_admission['visit_occurrence_id'].unique())}")
 
     sepsis_cases = df_sepsis_at_admission[["visit_occurrence_id", "person_id"]]
     sepsis_persons = tuple(sepsis_cases["person_id"].tolist())
+
     ### ------------------------- Training Data Processing ------------------------- ###
     sepsis_features = pd.read_csv(f"{default_path}/data/sepsis_features.csv")
+    
+    # remove unused features
     sepsis_features = sepsis_features[sepsis_features["feature_name"] != "_"]
-    print(f"Unique features being loaded {sepsis_features['feature_name'].unique()}")
-    concept_ids = tuple(sepsis_features["concept_id"].tolist())
+    
+    concept_ids = tuple(
+        sepsis_features["concept_id"]\
+            [sepsis_features["concept_id"].notna()]\
+            .tolist()
+    )
+
     weight_temp_concept_ids = tuple(
         sepsis_features[
             (sepsis_features["feature_name"] == "Temperature") |\
@@ -486,8 +543,9 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
         'gender_source_value'
     ] = 0
 
+    print(f"Unique features being loaded {sepsis_features['feature_name'][sepsis_features['concept_id'].isin(concept_ids)].unique()}")
     mq = query_measurement.format(person_ids=sepsis_persons, weight_temp_ids=weight_temp_concept_ids, concept_ids=concept_ids)
-    print(mq)
+
     df_measurements_long = pd_gbq.read_gbq(  # This includes all lab values and the body weight
         mq,
         project_id=PROJECT_ID,
@@ -495,7 +553,7 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
         use_bqstorage_api=True,
         credentials=credentials
     )
-    
+
     df_measurements_long = pd.merge(
         df_measurements_long,
         df_demographics_wide,
@@ -520,7 +578,7 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
 
     n_before = df_measurements_long.count().sum()
     print(f"Datapoints before: {df_measurements_long.count().sum()}")
-    df_measurements_long = drop_outliers(df_measurements_long)
+    df_measurements_long = drop_outliers_iqr_long(df_measurements_long, df_measurements_long["feature_name"].unique())
     print(f"Dropped {n_before-df_measurements_long.count().sum()} outliers.")
     print(f"{df_measurements_long.count().sum()} values are still present.")
 
@@ -544,6 +602,8 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
     #     on="visit_occurrent_id")
 
     ### -------------------- Merge Additional Columns Here ------------------------ ###
+    # 1. Note that outliers should be dropped!
+    
     ## Add sofa cns score
     df_sepsis = df_measurements_wide.merge(
         df_sepsis_at_admission[["visit_occurrence_id", "sofa_cns_score"]],
@@ -551,17 +611,20 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
         how="left"
     )
 
+    df_sepsis["sofa_cns_score"] = df_sepsis["sofa_cns_score"].astype(float)
     df_sepsis['gender_source_value'] = pd.to_numeric(df_sepsis['gender_source_value'], errors='coerce')
 
     # Add pao2/fio2
-    df_ventilation_wide = pd_gbq.read_gbq(  # This includes all lab values and the body weight
+    df_ventilation_wide = pd_gbq.read_gbq(
         query_ventilation.format(person_id=sepsis_persons),
         project_id=PROJECT_ID,
         configuration=config_gbq,
         use_bqstorage_api=True,
         credentials=credentials
     )
+    
     df_ventilation_wide["pao2_fio2_ratio"] = df_ventilation_wide["pao2"].astype(float) / df_ventilation_wide["fio2"].astype(float)
+    
     df_sepsis = df_sepsis.merge(
         df_ventilation_wide[
             [
@@ -576,8 +639,19 @@ def process_data(PROJECT_ID, config_gbq, bq_client=None, default_path="."):
         on=["visit_occurrence_id", "measurement_datetime"]
     )
 
+    df_sepsis = drop_outliers_iqr_wide(
+        df_sepsis,
+        ["pao2_fio2_ratio", "pao2"]
+    )
 
-    # Aggregate values to 4h values
+    #df_sepsis["ventilatory_support"] = df_sepsis["ventilatory_support"].astype(bool)
+    df_sepsis["pao2_fio2_ratio"] = df_sepsis["pao2_fio2_ratio"].astype(float)
+    df_sepsis["pao2"] = df_sepsis["pao2"].astype(float)
+
+    df_sepsis = df_sepsis.dropna(how="all")  # drop empty rows!
+
+
+    # ----------------------  Aggregate values to 4h values  ---------------------- #
     df_sepsis_windows = get_windowed_data(df_sepsis)
     result_non_na_cells = df_sepsis_windows.count().sum()
     print(f"dataset has {result_non_na_cells} non-na entries!")
@@ -688,12 +762,76 @@ if __name__ == '__main__':
     print(f"Remaining train missing: {df_filled_knn_interp_test.isna().sum()}")
     
     # Clustering
-    kmeans, cluster_centers = cluster_kmpp(df_filled_knn_interp_train, k=200)
+    #kmeans, cluster_centers = cluster_kmpp(df_filled_knn_interp_train, k=200)
 
-    print(cluster_centers)
-    pd.DataFrame({"state": cluster_centers}, index=df_filled_knn_interp_train.index).to_csv(f"./data/train_centers.csv")
-    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_val.values)}, index=df_filled_knn_interp_val.index).to_csv(f"./data/val_centers.csv")
-    pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_test.values)}, index=df_filled_knn_interp_test.index).to_csv(f"./data/test_centers.csv")
+    #print(cluster_centers)
+    #pd.DataFrame({"state": cluster_centers}, index=df_filled_knn_interp_train.index).to_csv(f"./data/train_centers.csv")
+    #pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_val.values)}, index=df_filled_knn_interp_val.index).to_csv(f"./data/val_centers.csv")
+    #pd.DataFrame({"state": kmeans.predict(df_filled_knn_interp_test.values)}, index=df_filled_knn_interp_test.index).to_csv(f"./data/test_centers.csv")
 
-    res, fig = evaluate_clustering(df_filled_knn_interp_train)
-    fig.savfig(f"./figures/clustering_eval.png")
+    #res, fig = evaluate_clustering(df_filled_knn_interp_train)
+    #fig.savefig(f"./figures/clustering_eval.png")
+
+    # Instantiate and train the autoencoder
+    used_features = df_filled_knn_interp_train.columns
+    #print(df_sepsis_time_windows.columns)
+    input_dim = len(used_features)  # Adjust based on your feature vector size
+    epochs = 30
+    batch_size = 128
+    latent_dim = 20
+
+    print(f"Creating Autoencoder with {len(used_features)} input size")
+    autoencoder = Autoencoder(input_dim, latent_dim=latent_dim, layer_sizes=[32, 16, 10], k=400)
+    #print(autoencoder)
+    criterion = DKNLoss()
+    optimizer = optim.Adam(autoencoder.parameters(), lr=1e-3)
+
+    icu_dataset = AmsICUSepticShock(df_filled_knn_interp_train[used_features])
+    data_loader = DataLoader(icu_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+    # Tracked data/metrics
+
+    metrics = training(
+        autoencoder,
+        optimizer,
+        criterion,
+        data_loader,
+        epochs=epochs,
+        model_path='./models/test_model.pth',
+        verbose=True
+    )
+
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import numpy as np
+
+    # Sample data (replace with actual data)
+    train_losses = metrics["train_loss"]  # Example loss values over epochs
+    cluster_history = metrics["cluster_history"]  # Example cluster centers (100 epochs, 3 centers)
+
+    # Plot training loss
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(x=range(len(train_losses)), y=train_losses, label="Training Loss", linewidth=2)
+    plt.title("Training Loss Over Epochs", fontsize=16, fontweight="bold")
+    plt.xlabel("Epoch", fontsize=14)
+    plt.ylabel("Loss", fontsize=14)
+    plt.grid(alpha=0.5)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
+    # Plot cluster center evolution
+    plt.figure(figsize=(10, 6))
+    for cluster_idx in range(cluster_history.shape[1]):
+        sns.lineplot(
+            x=range(len(cluster_history)), 
+            y=cluster_history[:, cluster_idx], 
+            label=f"Cluster {cluster_idx + 1}", 
+            linewidth=2
+        )
+    plt.title("Cluster Center Evolution Over Epochs", fontsize=16, fontweight="bold")
+    plt.xlabel("Epoch", fontsize=14)
+    plt.ylabel("Cluster Center Value", fontsize=14)
+    plt.grid(alpha=0.5)
+    plt.legend(fontsize=12, title="Clusters")
+    plt.tight_layout()
+    plt.show()

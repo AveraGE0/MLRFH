@@ -215,6 +215,31 @@ sofa_bilirubin AS (
 SELECT * FROM sofa_bilirubin
 """
 
+query_lactate_sepsis = """
+WITH filtered_measurement AS (
+    SELECT *
+    FROM measurement
+    WHERE provider_id IS NOT NULL
+),
+initial_lactate AS (
+    SELECT
+        n.visit_occurrence_id,
+        n.measurement_concept_id AS itemid,
+        n.measurement_source_value AS item,
+        n.value_as_number AS value,
+        n.provider_id AS registeredby,
+    FROM filtered_measurement n
+    LEFT JOIN visit_occurrence a ON
+        n.visit_occurrence_id = a.visit_occurrence_id
+    WHERE
+        n.measurement_concept_id IN (
+            3047181,
+            3014111
+        )
+)
+SELECT * FROM initial_lactate
+"""
+
 
 query_vasopressors_ionotropes = """
 WITH filtered_measurement AS (
@@ -467,5 +492,3 @@ WHERE
     TIMESTAMP_DIFF(m.measurement_datetime, vo.visit_start_datetime, MINUTE) BETWEEN -30 AND 1440 -- within 24 hours (and 30 minutes before)
 ORDER BY m.visit_occurrence_id, time
 """
-
-
