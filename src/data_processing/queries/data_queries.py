@@ -1,16 +1,15 @@
 query_demographics = '''
-    SELECT p.person_id, p.year_of_birth, p.gender_source_value
-    FROM person as p
+    SELECT vo.visit_occurrence_id, DATE_DIFF(DATE(vo.visit_start_datetime), DATE(CONCAT(p.year_of_birth, '-01-01')), YEAR) AS age_at_visit, p.gender_source_value
+    FROM visit_occurrence AS vo
 
-    --LEFT JOIN concept c ON m.measurement_concept_id = c.concept_id
+    LEFT JOIN person as p on vo.person_id = p.person_id
 
-    WHERE p.person_id IN {person_ids}
-    GROUP BY p.person_id, p.year_of_birth, p.gender_source_value
+    WHERE vo.visit_occurrence_id IN {visit_occurrence_ids}
+    GROUP BY vo.visit_occurrence_id, age_at_visit, p.gender_source_value
     '''
 
 query_measurement = '''
 SELECT
-    m.person_id,
     m.measurement_concept_id,
     c.concept_name,
     measurement_datetime,
@@ -20,11 +19,10 @@ FROM measurement as m
 LEFT JOIN concept c
     ON m.measurement_concept_id = c.concept_id
 WHERE
-    m.person_id IN {person_ids}
+    m.visit_occurrence_id IN {visit_occurrence_ids}
     AND m.provider_id IS NULL
     AND measurement_concept_id IN {weight_temp_ids}
 GROUP BY
-    m.person_id,
     m.measurement_concept_id,
     c.concept_name,
     measurement_datetime,
@@ -34,7 +32,6 @@ GROUP BY
 UNION ALL
 
 SELECT
-    m.person_id,
     m.measurement_concept_id,
     c.concept_name,
     measurement_datetime,
@@ -44,11 +41,10 @@ FROM measurement as m
 LEFT JOIN concept c
     ON m.measurement_concept_id = c.concept_id
 WHERE
-    m.person_id IN {person_ids}
+    m.visit_occurrence_id IN {visit_occurrence_ids}
     AND m.provider_id BETWEEN 27 AND 61
     AND c.concept_id IN {concept_ids}
 GROUP BY
-    m.person_id,
     m.measurement_concept_id,
     c.concept_name,
     measurement_datetime,
@@ -61,13 +57,13 @@ WITH filtered_measurement AS (
     SELECT *
     FROM measurement
     WHERE provider_id IS NOT NULL
-   AND person_id IN {person_id}
+   AND visit_occurrence_id IN {visit_occurrence_ids}
 ),
 filtered_observation AS (
     SELECT *
     FROM observation
     WHERE provider_id IS NOT NULL
-    AND person_id IN {person_id}
+    AND visit_occurrence_id IN {visit_occurrence_ids}
 ),
 fio2_table AS (
     SELECT

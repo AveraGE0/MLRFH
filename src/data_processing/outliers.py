@@ -16,6 +16,7 @@ def drop_outliers_iqr_wide(df_wide: pd.DataFrame, outlier_columns: list[str]):
         pd.DataFrame: DataFrame with outliers removed for specified columns.
     """
     for column in tqdm(outlier_columns, desc=f"Processing {len(outlier_columns)} columns"):
+        print(F"procssing column {outlier_columns}")
         if column not in df_wide.columns:
             print(f"Warning: Column '{column}' not found in the DataFrame. Skipping.")
             continue
@@ -30,10 +31,21 @@ def drop_outliers_iqr_wide(df_wide: pd.DataFrame, outlier_columns: list[str]):
         lower_bound = Q1 - 1.5 * IQR
         upper_bound = Q3 + 1.5 * IQR
 
+        p_dropped = sum((feature_values < lower_bound) & (feature_values > upper_bound)) / len(feature_values)
+        if p_dropped > 0.1:  # Fallback
+            print(f"Falling back to percentiles because {p_dropped}% of data would be removed.")
+            lower_bound = np.percentile(feature_values, 1)
+            upper_bound = np.percentile(feature_values, 99)
+        
+            p_dropped = sum((feature_values < lower_bound) & (feature_values > upper_bound)) / len(feature_values)
+            if p_dropped > 0.1:  # Fallback for fallback
+                print(f"Not dropping any outliers because {p_dropped}% of data would be removed.")
+                continue
+
         # Drop outliers
         df_wide.loc[
-            (df_wide[column] >= lower_bound) &\
-            (df_wide[column] <= upper_bound),
+            (df_wide[column] < lower_bound) &\
+            (df_wide[column] > upper_bound),
             column
         ] = np.nan
 
@@ -64,6 +76,17 @@ def drop_outliers_iqr_long(df_long: pd.DataFrame, outlier_columns: list[str]) ->
         # Define bounds
         lower_bound = Q1 - 1.5 * IQR
         upper_bound = Q3 + 1.5 * IQR
+
+        p_dropped = sum((feature_values < lower_bound) & (feature_values > upper_bound)) / len(feature_values)
+        if p_dropped > 0.1:  # Fallback
+            print(f"Falling back to percentiles because {p_dropped}% of data would be removed.")
+            lower_bound = np.percentile(feature_values, 1)
+            upper_bound = np.percentile(feature_values, 99)
+        
+            p_dropped = sum((feature_values < lower_bound) & (feature_values > upper_bound)) / len(feature_values)
+            if p_dropped > 0.1:  # Fallback for fallback
+                print(f"Not dropping any outliers because {p_dropped}% of data would be removed.")
+                continue
 
         # Filter data to remove outliers
         df_long = df_long[

@@ -9,7 +9,7 @@ import pandas_gbq as pd_gbq
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.stats import boxcox, skew
+from scipy.stats import boxcox, skew, yeojohnson
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 
@@ -25,44 +25,20 @@ from src.data_processing.data_imputation import (
     knn_impute_by_column,
     forward_fill_by_column,
     forward_fill_limited,
-    drop_features_with_missing_data
+    drop_features_with_missing_data,
+    knn_impute_dataset,
+    KNNImputer
 )
 from src.clustering import cluster_kmpp, evaluate_clustering
 from src.data_processing.outliers import drop_outliers_iqr_long, drop_outliers_iqr_wide
 
 from src.dkm import Autoencoder, DKNLoss, training, DataLoader
+from src.dataset import AmsICUSepticShock
 import torch.optim as optim
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 tqdm.pandas()
-
-class AmsICUSepticShock(Dataset):
-        def __init__(self, data, transform=None):
-            """
-            Args:
-                data (pd.DataFrame): Your data in a DataFrame format.
-                transform (callable, optional): Optional transforms to apply to the data.
-            """
-            self.data = data
-            self.transform = transform
-
-        def __len__(self):
-            # Return the number of samples in the dataset
-            return len(self.data)
-
-        def __getitem__(self, idx):
-            # Get the sample at index idx
-            sample = self.data.iloc[idx]
-
-            # Convert sample to a tensor
-            input_data = torch.tensor(sample.values, dtype=torch.float32)
-
-            # Apply transformations if any
-            if self.transform:
-                input_data = self.transform(input_data)
-
-            return input_data
 
 
 def get_sofa_resp(df_sofa_resp):
@@ -320,8 +296,23 @@ def get_sofa_creatinine(df_creatinine):
     return sofa_renal_creatinine
 
 
-def standardize_data(df_data_wide):
+def standardize_data(df_data_wide: pd.DataFrame, ignore_columns: list):
+    """Function to make z-scores out of the numeric columns. Any columns in the ignore columns
+    will not be touched.
+
+    Args:
+        df_data_wide_pd (_type_): DataFrame in wide format with the data
+        ignore_columns (list): Columns not transformed
+
+    Returns:
+        _type_: _description_
+    """
     numeric_features = df_data_wide.select_dtypes(include=['number']).columns.tolist()
+    for ignored_col in ignore_columns:
+        if ignored_col in numeric_features:
+            numeric_features.remove(ignored_col)
+        else:
+            print(f"Warning, could not ignore column {ignored_col} since it was not in the numeric colunms!")
     df_data_wide[numeric_features] = df_data_wide[numeric_features].apply(lambda x: (x - x.mean()) / x.std(), axis=0)
     return df_data_wide
 
@@ -346,18 +337,23 @@ def get_windowed_data(df_data, time_window: str='12h'):
 
 
 
-def transform_data(df_data_wide: pd.DataFrame):
+def transform_data(df_data_wide: pd.DataFrame, ignore_columns: list):
     """Performs a box-cox transformation of the data.
 
     Args:
         df_data_wide (pd.DataFrame): input data frame.
     """
     numeric_column = df_data_wide.select_dtypes(include=['number']).columns.tolist()
+    for ignored_col in ignore_columns:
+        if ignored_col in numeric_column:
+            numeric_column.remove(ignored_col)
+        else:
+            print(f"Warning, could not ignore column {ignored_col} since it was not in the numeric colunms!")
     # Iterate over features and apply Box-Cox transformation
     for feature in numeric_column:
         valid_values = df_data_wide[feature].dropna()  # Exclude NaNs for Box-Cox
-        transformed, _ = boxcox(
-            valid_values + ((abs(valid_values.min()) + 1) if valid_values.min() <= 0 else 0)
+        transformed, _ = yeojohnson(
+            valid_values
         )
         print("transforming", feature)
         if abs(skew(df_data_wide[feature].dropna().tolist())) > abs(skew(transformed)):
@@ -369,7 +365,7 @@ def transform_data(df_data_wide: pd.DataFrame):
 def get_wide_measurements(df_measurements_long):
     ## Ensure all columns are available in the data
     # specifically drop concept_id and concept_name
-    columns_to_keep = ["visit_occurrence_id", "measurement_datetime", "feature_name", "value_as_number", "year_of_birth", "gender_source_value"]
+    columns_to_keep = ["visit_occurrence_id", "measurement_datetime", "feature_name", "value_as_number"]
     df_measurements_long = df_measurements_long[columns_to_keep]
 
     # Sort the data by "measurement_datetime"
@@ -377,19 +373,46 @@ def get_wide_measurements(df_measurements_long):
 
     # Group the data to average duplicate measurements (preserve non-grouping columns)
     df_measurements_long = df_measurements_long.groupby(
-        ["visit_occurrence_id", "measurement_datetime", "feature_name", "gender_source_value", "year_of_birth"],
+        ["visit_occurrence_id", "measurement_datetime", "feature_name"],
         as_index=False
     ).mean(numeric_only=True)
 
     # Pivot the data to wide format
     df_measurements_wide = df_measurements_long.pivot(
-        index=["visit_occurrence_id", "measurement_datetime", "gender_source_value", "year_of_birth"],
+        index=["visit_occurrence_id", "measurement_datetime"],
         columns="feature_name",
         values="value_as_number"
     )
 
     # Reset the index to make it a flat DataFrame
     return df_measurements_wide.reset_index()
+
+
+def get_demographic_features(df_demo_wide: pd.DataFrame) -> pd.DataFrame:
+    """Transforms the gender_source_value column to a binary gender column.
+
+    Args:
+        df_demo_wide (pd.DataFrame): Demographics DataFrame (wide).
+
+    Returns:
+        pd.DataFrame: Transformed df.
+    """
+    # Make gender binary
+    df_demo_wide["Gender"] = np.nan
+    df_demo_wide.loc[
+        df_demo_wide['gender_source_value'].str.contains('Man', case=False, na=False),
+        "Gender"
+    ] = 1
+    df_demo_wide.loc[
+        df_demo_wide['gender_source_value'].str.contains('Vrouw', case=False, na=False),
+        'Gender'
+    ] = 0
+
+    df_demo_wide["age_at_visit"] = df_demo_wide["age_at_visit"].astype(float)
+
+    return df_demo_wide
+
+
 
 
 def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, default_path: str="."):
@@ -506,6 +529,8 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
 
     sepsis_cases = df_sepsis_at_admission[["visit_occurrence_id", "person_id"]]
     sepsis_persons = tuple(sepsis_cases["person_id"].tolist())
+    septic_shock_visit_ids = tuple(sepsis_cases["visit_occurrence_id"].tolist())
+    print(f"Septic shock patients: {len(sepsis_cases)}")
 
     ### ------------------------- Training Data Processing ------------------------- ###
     sepsis_features = pd.read_csv(f"{default_path}/data/sepsis_features.csv")
@@ -528,23 +553,17 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
 
 
     df_demographics_wide = pd_gbq.read_gbq(
-        query_demographics.format(person_ids=sepsis_persons),
+        query_demographics.format(visit_occurrence_ids=septic_shock_visit_ids),
         project_id=PROJECT_ID,
         configuration=config_gbq,
         use_bqstorage_api=True,
         credentials=credentials
     )
-    df_demographics_wide.loc[
-        df_demographics_wide['gender_source_value'].str.contains('Man', case=False, na=False),
-        'gender_source_value'
-    ] = 1
-    df_demographics_wide.loc[
-        df_demographics_wide['gender_source_value'].str.contains('Vrouw', case=False, na=False),
-        'gender_source_value'
-    ] = 0
+
+    df_demographics_wide = get_demographic_features(df_demographics_wide)
 
     print(f"Unique features being loaded {sepsis_features['feature_name'][sepsis_features['concept_id'].isin(concept_ids)].unique()}")
-    mq = query_measurement.format(person_ids=sepsis_persons, weight_temp_ids=weight_temp_concept_ids, concept_ids=concept_ids)
+    mq = query_measurement.format(visit_occurrence_ids=septic_shock_visit_ids, weight_temp_ids=weight_temp_concept_ids, concept_ids=concept_ids)
 
     df_measurements_long = pd_gbq.read_gbq(  # This includes all lab values and the body weight
         mq,
@@ -553,14 +572,7 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
         use_bqstorage_api=True,
         credentials=credentials
     )
-
-    df_measurements_long = pd.merge(
-        df_measurements_long,
-        df_demographics_wide,
-        on="person_id",
-        how="left"
-    )
-    print(f"Cols with dem: {df_measurements_long.columns}")
+    print(f"Cols : {df_measurements_long.columns}")
 
     #df_measurements_long["value_as_number"] = df_measurements_long["value_as_number"].astype(float)
     df_measurements_long["measurement_datetime"] = pd.to_datetime(df_measurements_long["measurement_datetime"])
@@ -586,6 +598,7 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
     df_measurements_wide = get_wide_measurements(df_measurements_long)
     print(f"Index before: {index_long}, after: {df_measurements_wide.head(10).index}")
     print(f"Wide temp dps: {df_measurements_wide['Temperature'].notna().sum()}")
+    print(F"Wide temp rows: {len(df_measurements_wide)}")
     print(df_measurements_wide.head(5))
     print(df_measurements_wide.columns)
 
@@ -612,11 +625,11 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
     )
 
     df_sepsis["sofa_cns_score"] = df_sepsis["sofa_cns_score"].astype(float)
-    df_sepsis['gender_source_value'] = pd.to_numeric(df_sepsis['gender_source_value'], errors='coerce')
+    #df_sepsis['gender_source_value'] = pd.to_numeric(df_sepsis['gender_source_value'], errors='coerce')
 
     # Add pao2/fio2
     df_ventilation_wide = pd_gbq.read_gbq(
-        query_ventilation.format(person_id=sepsis_persons),
+        query_ventilation.format(visit_occurrence_ids=septic_shock_visit_ids),
         project_id=PROJECT_ID,
         configuration=config_gbq,
         use_bqstorage_api=True,
@@ -639,6 +652,9 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
         on=["visit_occurrence_id", "measurement_datetime"]
     )
 
+    # drop unreasonable values
+    #df_sepsis.loc[df_sepsis['pao2'] >= 400, 'pao2'] = np.nan
+
     df_sepsis = drop_outliers_iqr_wide(
         df_sepsis,
         ["pao2_fio2_ratio", "pao2"]
@@ -650,17 +666,27 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
 
     df_sepsis = df_sepsis.dropna(how="all")  # drop empty rows!
 
+    df_sepsis = pd.merge(
+        df_sepsis,
+        df_demographics_wide[["visit_occurrence_id", "Gender", "age_at_visit"]],
+        on="visit_occurrence_id",
+        how="left"
+    )
+
 
     # ----------------------  Aggregate values to 4h values  ---------------------- #
     df_sepsis_windows = get_windowed_data(df_sepsis)
     result_non_na_cells = df_sepsis_windows.count().sum()
     print(f"dataset has {result_non_na_cells} non-na entries!")
-
+    
+    trans_ignore_cols = ["index", "Gender", "ventilatory_support", "seq_id"]
     # Transforming data with box-cox
-    df_more_normal = transform_data(df_sepsis_windows)
+    df_more_normal = transform_data(df_sepsis_windows, ignore_columns=trans_ignore_cols)
     
     # Standardizing data for imputation and clustering
-    df_standardized = standardize_data(df_more_normal)
+    df_standardized = standardize_data(df_more_normal, ignore_columns=trans_ignore_cols)
+
+    df_standardized = df_standardized.drop(columns=["index", "seq_id"])
 
     # plot some stuff
     print(df_standardized.describe())
@@ -703,12 +729,33 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
 
     # Define a function to apply KNN imputation for each visit occurrence
     # Apply the KNN imputation with dynamic k
-    df_knn_imputed_train = knn_impute_by_column(train_data)
+    print("Starting k means imputation")
+    knn_imputer = KNNImputer(n_neighbors=5)
+    # Apply KNN imputation to the entire dataset
+    imputed_values_train = knn_imputer.fit_transform(train_data)
+
+    # Create a new DataFrame with the imputed values
+    df_knn_imputed_train = pd.DataFrame(
+        imputed_values_train,
+        columns=train_data.columns,
+        index=train_data.index
+    )#knn_impute_by_column(train_data)
     print('train data done')
-    df_knn_imputed_val = knn_impute_by_column(valid_data)
+    df_knn_imputed_val = pd.DataFrame(
+        knn_imputer.transform(valid_data),
+        columns=valid_data.columns,
+        index=valid_data.index
+    )#knn_impute_by_column(valid_data)
     print('validation data done')
-    df_knn_imputed_test = knn_impute_by_column(test_data)
+    df_knn_imputed_test = pd.DataFrame(
+        knn_imputer.transform(test_data),
+        columns=test_data.columns,
+        index=test_data.index
+    )#knn_impute_by_column(test_data)
+
+
     print('test data done')
+    print("Imputation done!")
 
     plot_missing_data(df_knn_imputed_train, 'Train KNN').savefig(f"{default_path}/figures/ffknn_train_missing_data.png")
     plot_missing_data(df_knn_imputed_val, 'Validation KNN').savefig(f"{default_path}/figures/ffknn_val_missing_data.png")
@@ -724,11 +771,17 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
     print("Columns dropped from validation data:", dropped_features_val)
     print("Columns dropped from test data:", dropped_features_test)
 
+    # convert binary to binary after kNN
+    for col in ["Gender", "ventilatory_support"]:
+        df_knn_imputed_train[col] = df_knn_imputed_train[col].round().astype(int)
+        df_knn_imputed_val[col] = df_knn_imputed_val[col].round().astype(int)
+        df_knn_imputed_test[col] = df_knn_imputed_test[col].round().astype(int)
+
     # Perform linear interpolation on remaining missing values
-    df_filled_knn_interp_train = df_knn_imputed_train.interpolate(method='linear', axis=0, limit_direction='both')
-    df_filled_knn_interp_val = df_knn_imputed_val.interpolate(method='linear', axis=0, limit_direction='both')
-    df_filled_knn_interp_test = df_knn_imputed_test.interpolate(method='linear', axis=0, limit_direction='both')
-    return df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test
+    #df_filled_knn_interp_train = df_knn_imputed_train.interpolate(method='linear', axis=0, limit_direction='both')
+    #df_filled_knn_interp_val = df_knn_imputed_val.interpolate(method='linear', axis=0, limit_direction='both')
+    #df_filled_knn_interp_test = df_knn_imputed_test.interpolate(method='linear', axis=0, limit_direction='both')
+    return df_knn_imputed_train, df_knn_imputed_val, df_knn_imputed_test
 
 
 if __name__ == '__main__':
@@ -756,10 +809,30 @@ if __name__ == '__main__':
 
     df_filled_knn_interp_train, df_filled_knn_interp_val, df_filled_knn_interp_test = process_data(PROJECT_ID, config_gbq, bq_client)
 
+    # Step 1: Compute Correlation Matrix
+    correlation_matrix = df_filled_knn_interp_train.corr()
+
+    # Step 2: Plot Heatmap
+    plt.figure(figsize=(12, 10))  # Set the size of the heatmap
+    sns.heatmap(
+        correlation_matrix,
+        annot=True,        # Annotate cells with correlation values
+        fmt=".2f",         # Format for decimal places
+        cmap="coolwarm",   # Color map
+        cbar=True,         # Show color bar
+        annot_kws={"size": 4}
+
+    )
+    plt.title("Correlation Matrix Heatmap")
+    plt.savefig(f"./figures/correlation_matrix.png", dpi=400, bbox_inches="tight")
+
+    df_filled_knn_interp_train = df_filled_knn_interp_train.drop(columns=["Bicarbonate"])
+    df_filled_knn_interp_val = df_filled_knn_interp_val.drop(columns=["Bicarbonate"])
+    df_filled_knn_interp_test = df_filled_knn_interp_test.drop(columns=["Bicarbonate"])
     # Display the resulting DataFrame
     print(f"Remaining train missing: {df_filled_knn_interp_train.isna().sum()}")
-    print(f"Remaining train missing: {df_filled_knn_interp_val.isna().sum()}")
-    print(f"Remaining train missing: {df_filled_knn_interp_test.isna().sum()}")
+    print(f"Remaining val missing: {df_filled_knn_interp_val.isna().sum()}")
+    print(f"Remaining test missing: {df_filled_knn_interp_test.isna().sum()}")
     
     # Clustering
     #kmeans, cluster_centers = cluster_kmpp(df_filled_knn_interp_train, k=200)
@@ -771,67 +844,110 @@ if __name__ == '__main__':
 
     #res, fig = evaluate_clustering(df_filled_knn_interp_train)
     #fig.savefig(f"./figures/clustering_eval.png")
+    print(df_filled_knn_interp_train.dtypes)
+    print(df_filled_knn_interp_train.describe())
+    import optuna
 
-    # Instantiate and train the autoencoder
-    used_features = df_filled_knn_interp_train.columns
-    #print(df_sepsis_time_windows.columns)
-    input_dim = len(used_features)  # Adjust based on your feature vector size
-    epochs = 30
-    batch_size = 128
-    latent_dim = 20
+    def optuna_objective(trial):
+        # Define hyperparameters to tune
+        latent_dim = trial.suggest_categorical("latent_dim", [8, 16, 32])  # Latent space size
+        layer_sizes = trial.suggest_categorical("layer_sizes", [[64, 32, 16], [32, 16, 10], [128, 64, 32]])  # Layer architectures
+        lr = trial.suggest_loguniform("lr", 1e-4, 1e-2)  # Learning rate
+        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])  # Batch sizes
 
-    print(f"Creating Autoencoder with {len(used_features)} input size")
-    autoencoder = Autoencoder(input_dim, latent_dim=latent_dim, layer_sizes=[32, 16, 10], k=400)
-    #print(autoencoder)
-    criterion = DKNLoss()
-    optimizer = optim.Adam(autoencoder.parameters(), lr=1e-3)
+        input_dim = len(df_filled_knn_interp_train.columns)# - 1  # Adjust based on your feature vector size
+        epochs = 30
 
-    icu_dataset = AmsICUSepticShock(df_filled_knn_interp_train[used_features])
-    data_loader = DataLoader(icu_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-    # Tracked data/metrics
+        print(f"Creating Autoencoder with {input_dim} input size and layers {layer_sizes}")
+        autoencoder = Autoencoder(input_dim, latent_dim=latent_dim, layer_sizes=layer_sizes, k=400)
+        criterion = DKNLoss()
+        optimizer = optim.Adam(autoencoder.parameters(), lr=lr)
 
-    metrics = training(
-        autoencoder,
-        optimizer,
-        criterion,
-        data_loader,
-        epochs=epochs,
-        model_path='./models/test_model.pth',
-        verbose=True
+        # Dataset and DataLoader
+        used_features = df_filled_knn_interp_train.columns
+        icu_dataset = AmsICUSepticShock(df_filled_knn_interp_train[used_features])
+        data_loader = DataLoader(icu_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+
+        # Move model to device
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        print(f"Using device {device}")
+        autoencoder = autoencoder.to(device)
+
+        # Training
+        metrics = training(
+            autoencoder,
+            optimizer,
+            criterion,
+            data_loader,
+            epochs=epochs,
+            model_path=f"./models/test_model_{trial.number}.pth",
+            verbose=False
+        )
+        # Sample data (replace with actual data)
+        train_losses = metrics["train_loss"]  # Example loss values over epochs
+
+        # Plot training loss
+        plt.figure(figsize=(10, 6))
+        sns.lineplot(x=range(len(train_losses)), y=train_losses, label="Training Loss", linewidth=2)
+        plt.title("Training Loss Over Epochs", fontsize=16, fontweight="bold")
+        plt.xlabel("Epoch", fontsize=14)
+        plt.ylabel("Loss", fontsize=14)
+        plt.grid(alpha=0.5)
+        plt.legend(fontsize=12)
+        plt.tight_layout()
+        plt.savefig(f"./figures/test_model_{trial.number}.png")
+
+        # Return the final training loss as the objective value
+        return metrics["train_loss"][-1]
+    
+    storage = "sqlite:///optuna_study.db"
+    study = optuna.create_study(
+        storage=storage,
+        study_name="deep_kmeans_autoencoder",
+        direction="minimize",  # Minimize training loss
+        load_if_exists=True
     )
 
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    import numpy as np
+    # Optimize the study
+    study.optimize(optuna_objective, n_trials=50)
 
-    # Sample data (replace with actual data)
-    train_losses = metrics["train_loss"]  # Example loss values over epochs
-    cluster_history = metrics["cluster_history"]  # Example cluster centers (100 epochs, 3 centers)
+    # Print the best hyperparameters
+    print("Best hyperparameters:")
+    print(study.best_params)
 
-    # Plot training loss
-    plt.figure(figsize=(10, 6))
-    sns.lineplot(x=range(len(train_losses)), y=train_losses, label="Training Loss", linewidth=2)
-    plt.title("Training Loss Over Epochs", fontsize=16, fontweight="bold")
-    plt.xlabel("Epoch", fontsize=14)
-    plt.ylabel("Loss", fontsize=14)
-    plt.grid(alpha=0.5)
-    plt.legend(fontsize=12)
-    plt.tight_layout()
-    plt.show()
+    # Save the study results
+    study.trials_dataframe().to_csv("optuna_study_results.csv")
+    # Instantiate and train the autoencoder
+    # used_features = df_filled_knn_interp_train.columns
+    # used_features.remove("index")
 
-    # Plot cluster center evolution
-    plt.figure(figsize=(10, 6))
-    for cluster_idx in range(cluster_history.shape[1]):
-        sns.lineplot(
-            x=range(len(cluster_history)), 
-            y=cluster_history[:, cluster_idx], 
-            label=f"Cluster {cluster_idx + 1}", 
-            linewidth=2
-        )
-    plt.title("Cluster Center Evolution Over Epochs", fontsize=16, fontweight="bold")
-    plt.xlabel("Epoch", fontsize=14)
-    plt.ylabel("Cluster Center Value", fontsize=14)
-    plt.grid(alpha=0.5)
-    plt.legend(fontsize=12, title="Clusters")
-    plt.tight_layout()
-    plt.show()
+    # #print(df_sepsis_time_windows.columns)
+    # input_dim = len(used_features)  # Adjust based on your feature vector size
+    # epochs = 30
+    # batch_size = 128
+    # latent_dim = 20
+
+    # print(f"Creating Autoencoder with {len(used_features)} input size")
+    # autoencoder = Autoencoder(input_dim, latent_dim=latent_dim, layer_sizes=[32, 16, 10], k=400)
+    # #print(autoencoder)
+    # criterion = DKNLoss()
+    # optimizer = optim.Adam(autoencoder.parameters(), lr=1e-3)
+
+    # icu_dataset = AmsICUSepticShock(df_filled_knn_interp_train[used_features])
+    # data_loader = DataLoader(icu_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+    # # Tracked data/metrics
+
+    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    # print(f"Using device {device}")
+    # autoencoder = autoencoder.to(device)
+
+    # metrics = training(
+    #     autoencoder,
+    #     optimizer,
+    #     criterion,
+    #     data_loader,
+    #     epochs=epochs,
+    #     model_path='./models/test_model.pth',
+    #     verbose=True
+    # )
+

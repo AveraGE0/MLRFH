@@ -87,17 +87,31 @@ def evaluate_clustering(df_data, cluster_sizes=None):
 
     # Evaluate clustering for each cluster size
     for k in tqdm(cluster_sizes):
-        # Fit Gaussian Mixture Model for BIC and AIC
-        gmm = GaussianMixture(n_components=k, covariance_type='full', random_state=42)
-        gmm.fit(df_data)
-        bic_values.append(gmm.bic(df_data))
-        aic_values.append(gmm.aic(df_data))
-
         # Fit KMeans for Total Within-Cluster Sum of Squares
-        kmeans, cluster = cluster_kmpp(df_data, k=k, random_state=42)
-        _, distances = pairwise_distances_argmin_min(kmeans.cluster_centers_, df_data)
-        wss = sum(distances ** 2)
+        kmeans, cluster = cluster_kmpp(df_data, k=k, random_state=42, n_jobs=1)
+        
+        distances = np.min(kmeans.transform(df_data), axis=1)  # Distances to nearest centroids
+        wss = np.sum(distances ** 2)
         wss_values.append(wss)
+
+        # AIC and BIC
+        # Number of data points and dimensions
+        n = len(df_data)
+        d = len(df_data.columns)  # Number of dimensions
+        
+        # Number of parameters
+        n_params = k * d + k  # Centroids' positions + Variances for each cluster
+
+        # Log-likelihood (approximated for K-Means)
+        distances = np.min(kmeans.transform(df_data), axis=1)
+        log_likelihood = -np.sum(distances**2) / 2  # Assuming Gaussian-like clusters
+
+        # AIC and BIC
+        aic = 2 * n_params - 2 * log_likelihood
+        bic = n_params * np.log(n) - 2 * log_likelihood
+        
+        bic_values.append(bic)
+        aic_values.append(aic)
 
     # Compile results into a DataFrame
     results = pd.DataFrame({
@@ -108,25 +122,51 @@ def evaluate_clustering(df_data, cluster_sizes=None):
     })
 
     # Plot the results
-    fig, ax = plt.subplots(3, 1, figsize=(10, 15))
-    ax[0].plot(cluster_sizes, results['BIC'], marker='o', label='BIC')
-    ax[0].set_title('Bayesian Information Criterion (BIC)')
-    ax[0].set_xlabel('Cluster Size')
-    ax[0].set_ylabel('BIC')
-    ax[0].grid(True)
+    # fig, ax = plt.subplots(3, 1, figsize=(10, 15))
+    # ax[0].plot(cluster_sizes, results['BIC'], marker='o', label='BIC')
+    # ax[0].set_title('Bayesian Information Criterion (BIC)')
+    # ax[0].set_xlabel('Cluster Size')
+    # ax[0].set_ylabel('BIC')
+    # ax[0].grid(True)
 
-    ax[1].plot(cluster_sizes, results['AIC'], marker='o', label='AIC', color='orange')
-    ax[1].set_title('Akaike Information Criterion (AIC)')
-    ax[1].set_xlabel('Cluster Size')
-    ax[1].set_ylabel('AIC')
-    ax[1].grid(True)
+    # ax[1].plot(cluster_sizes, results['AIC'], marker='o', label='AIC', color='orange')
+    # ax[1].set_title('Akaike Information Criterion (AIC)')
+    # ax[1].set_xlabel('Cluster Size')
+    # ax[1].set_ylabel('AIC')
+    # ax[1].grid(True)
 
-    ax[2].plot(cluster_sizes, results['WSS'], marker='o', label='WSS', color='green')
-    ax[2].set_title('Total Within-Cluster Sum of Squares (WSS)')
-    ax[2].set_xlabel('Cluster Size')
-    ax[2].set_ylabel('WSS')
-    ax[2].grid(True)
+    # ax[2].plot(cluster_sizes, results['WSS'], marker='o', label='WSS', color='green')
+    # ax[2].set_title('Total Within-Cluster Sum of Squares (WSS)')
+    # ax[2].set_xlabel('Cluster Size')
+    # ax[2].set_ylabel('WSS')
+    # ax[2].grid(True)
 
+    # plt.tight_layout()
+    # plt.show()
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Plot BIC
+    ax.plot(cluster_sizes, results['BIC'], marker='o', label='BIC', color='blue')
+
+    # Plot AIC
+    ax.plot(cluster_sizes, results['AIC'], marker='o', label='AIC', color='orange')
+
+    # Plot WSS
+    ax.plot(cluster_sizes, results['WSS'], marker='o', label='WSS', color='green')
+
+    # Add gridlines
+    ax.grid(True, linestyle='--', alpha=0.6)
+
+    # Add labels and title
+    ax.set_title('Clustering Metrics by Cluster Size', fontsize=16, fontweight='bold', pad=15)
+    ax.set_xlabel('Cluster Size', fontsize=14, fontweight='bold', labelpad=10)
+    ax.set_ylabel('Metric Values', fontsize=14, fontweight='bold', labelpad=10)
+
+    # Add a legend
+    ax.legend(fontsize=12, loc='best')
+
+    # Adjust layout and show the plot
     plt.tight_layout()
     plt.show()
 

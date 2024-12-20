@@ -23,7 +23,7 @@ def forward_fill_by_column(df, avg_nans_per_column):
             average_nans = avg_nans_per_column[column]
 
             # Special handling for 'Body weight' column
-            if column == 'Body weight':
+            if column == 'Weight':
                 df_filled[column] = df.groupby("visit_occurrence_id", group_keys=False)[column].ffill()
             else:
                 df_filled[column] = (
@@ -72,6 +72,37 @@ def knn_impute_by_column(df):
 
             # Ensure that imputed values align with the original index and corresponding columns
             df_imputed.loc[group.index, imputed_columns] = imputed_values
+
+    return df_imputed
+
+
+def knn_impute_dataset(df, k=None):
+    """
+    Applies KNN imputation to the entire dataset.
+
+    Parameters:
+        df (pd.DataFrame): Input DataFrame with missing values.
+        k (int, optional): Number of neighbors for KNN imputation. If None, k is calculated as sqrt(N), where N is the number of rows.
+
+    Returns:
+        pd.DataFrame: DataFrame with missing values imputed.
+    """
+    df_imputed = df.copy()  # Create a copy of the DataFrame
+
+    # Dynamically calculate k if not provided
+    if k is None:
+        N = len(df_imputed)
+        k = int(np.sqrt(N))
+        k = max(2, min(k, N - 1))  # Ensure k is between 2 and N-1
+
+    # Initialize KNNImputer with the calculated or provided k
+    knn_imputer = KNNImputer(n_neighbors=k)
+
+    # Apply KNN imputation to the entire dataset
+    imputed_values = knn_imputer.fit_transform(df_imputed)
+
+    # Create a new DataFrame with the imputed values
+    df_imputed = pd.DataFrame(imputed_values, columns=df.columns, index=df.index)
 
     return df_imputed
 

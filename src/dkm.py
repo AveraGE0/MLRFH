@@ -5,9 +5,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
 
 def g(
-        f: callable,
         k: int,
         h_x: torch.Tensor,
         alpha: float,
@@ -24,11 +27,12 @@ def g(
         R (torch.Tensor): (Current) cluster centers.
 
     Returns:
-        torch.Tensor: softmax value for index k.
+        torch.Tensor: Softmax value for index k.
     """
-    numerator = torch.exp(-alpha*f(h_x, R[k]))
-    denominator = torch.sum(torch.exp(-alpha*f(h_x, r_k)) for r_k in R)
-    return numerator/denominator
+    distances = torch.cdist(h_x.unsqueeze(0), R.unsqueeze(0)).squeeze(0)  # Pairwise distances, replaces f
+    numerator = torch.exp(-alpha * distances[:, k])
+    denominator = torch.sum(torch.exp(-alpha * distances), dim=1) + 1e-8  # Add epsilon for numerical stability
+    return numerator / denominator
 
 
 # Define a basic autoencoder architecture
@@ -37,7 +41,7 @@ class Autoencoder(nn.Module):
     which is then reconstructed in the decoder. The encoder/decoder are defined
     with similar but mirrored structure of layers (and layer sizes).
     """
-    def __init__(self, input_dim: int, latent_dim: int, layer_sizes: list[int]=[64, 32]):
+    def __init__(self, input_dim: int, latent_dim: int, k: int, layer_sizes: list[int]=[64, 32]):
         super().__init__()
         self.latent_dim = latent_dim
 
@@ -61,6 +65,7 @@ class Autoencoder(nn.Module):
         self.decoder = nn.Sequential(
             *layers_decoder
         )
+        self.cluster_centers = nn.Parameter(torch.rand(k, latent_dim))  # Learnable cluster centers
 
     def forward(self, x) -> tuple[torch.Tensor, torch.Tensor]:
         latents = self.encoder(x)
@@ -72,34 +77,37 @@ class Autoencoder(nn.Module):
 
 
 class DKNLoss(nn.Module):
-    def __init__(self, k, latent_size, lambda_cl=1.0):
+    def __init__(self, alpha=1.0, lambda_cl=1.0):
         super().__init__()
         self.lambda_cl = lambda_cl
         self.mse_rec = nn.MSELoss()
-        self.mse_clust = nn.MSELoss()
-        self.k = k
-        # we will save the cluster centers in the training
-        # to see how they develop
-        self.cluster_centers = torch.rand(size=(k, latent_size))
-        self.cluster_assignments = None
+        self.alpha = alpha
 
-    def forward(self, x: torch.Tensor, h_x: torch.Tensor, a_x: torch.Tensor):
-        """Method to determine the loss of the DKN.
+    def forward(self, x: torch.Tensor, h_x: torch.Tensor, a_x: torch.Tensor, cluster_centers):
+        """Compute the DKN loss.
 
         Args:
-          x (torch.Tensor): input data
-          h_x (torch.Tensor): latent of input data
-          a_x (torch.Tensor): reconstructed input data
+          x (torch.Tensor): Input data.
+          h_x (torch.Tensor): Latent representations of input data.
+          a_x (torch.Tensor): Reconstructed data.
         """
+        # Reconstruction Loss
         loss_reconstr = self.mse_rec(x, a_x)
 
-        distances = torch.cdist(h_x, self.cluster_centers)
-        self.cluster_assignments = torch.argmin(distances, dim=1)  # Closest cluster center
-        r_x = self.cluster_centers[self.cluster_assignments]
+        # Compute soft assignments using G function
+        soft_assignments = torch.stack(
+            [g(k, h_x, self.alpha, cluster_centers) for k in range(cluster_centers.size(0))],
+            dim=1
+        )  # Shape: [batch_size, k]
 
-        loss_clustering = self.mse_clust(h_x, r_x)
+        # Compute weighted cluster centers
+        weighted_centers = torch.matmul(soft_assignments, cluster_centers)  # Shape: [batch_size, latent_size]
+
+        # Clustering Loss
+        loss_clustering = self.mse_rec(h_x, weighted_centers)
 
         return loss_reconstr + self.lambda_cl * loss_clustering
+
 
 
 def training(
@@ -109,40 +117,34 @@ def training(
         data_loader: DataLoader,
         epochs: int,
         model_path: Path,
+        alpha_init=1.0,
+        alpha_final=100.0,
         verbose=True
     ) -> dict:
     if not str(model_path).endswith(".pth"):
-        raise ValueError(f"Model path should end with .pth! Currently: {model_path}")
+        raise ValueError(f"Model path should end with .pth got {model_path}.")
 
     # Tracked metrics
     train_losses = []
-    # TODO: add these metrics
-    train_loss_reconstruction = []
-    train_loss_clusters = []
-    cluster_history = []
+
+    alpha = alpha_init
+    alpha_step = (alpha_final - alpha_init) / epochs
 
     for epoch in range(epochs):
         autoencoder.train()
         train_loss = 0
 
-        for batch in tqdm(data_loader, desc=f"Training Epoch {epoch}"):
+        for batch in tqdm(data_loader, desc=f"Epoch {epoch + 1}/{epochs}"):
             optimizer.zero_grad()
-
+            batch = batch.to(next(autoencoder.parameters()).device)
+            # Forward pass
             reconstructed, latents = autoencoder(batch)
-            loss = criterion(batch, latents, reconstructed)
-            loss.backward(retain_graph=True)
+            criterion.alpha = alpha
+            loss = criterion(batch, latents, reconstructed, autoencoder.cluster_centers)
+            
+            loss.backward()
             optimizer.step()
             train_loss += loss.item()
-
-            # Update cluster centers
-            with torch.no_grad():
-                for i in range(criterion.k):
-                    # Select latent points assigned to this cluster
-                    assigned_points = latents[criterion.cluster_assignments == i]
-                    if len(assigned_points) > 0:  # Avoid empty cluster updates
-                        criterion.cluster_centers[i] = torch.mean(assigned_points, dim=0)
-
-        cluster_history.append(criterion.cluster_centers.detach().clone())
 
         train_loss /= len(data_loader)  # Average training loss for the epoch
         train_losses.append(train_loss)
@@ -150,12 +152,12 @@ def training(
         if verbose:
             print(f"Epoch {epoch + 1}, Loss: {train_loss}")
 
-    # Save the trained model
-    torch.save(autoencoder.state_dict(), model_path)
+        alpha += alpha_step
+
+        # Save the trained model
+        print("Saving model")
+        torch.save(autoencoder.state_dict(), model_path)
 
     return {
-        "train_loss": train_loss,
-        "train_loss_clusters": train_loss_clusters,
-        "train_loss_reconstruction": train_loss_reconstruction,
-        "cluster_history": cluster_history
+        "train_loss": train_losses
     }
