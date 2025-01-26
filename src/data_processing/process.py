@@ -3,6 +3,7 @@
 Author: Mika Florin Rosin
 """
 import os
+import json
 
 import pandas as pd
 import pandas_gbq as pd_gbq
@@ -349,16 +350,32 @@ def transform_data(df_data_wide: pd.DataFrame, ignore_columns: list):
             numeric_column.remove(ignored_col)
         else:
             print(f"Warning, could not ignore column {ignored_col} since it was not in the numeric colunms!")
+    # plot for appendix
+    n_cols = 5  # Number of columns in the grid
+    n_rows = (len(numeric_column) // n_cols) + (len(numeric_column) % n_cols > 0)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 3 * n_rows))
+    axes = axes.flatten()
     # Iterate over features and apply Box-Cox transformation
-    for feature in numeric_column:
+    for i, feature in enumerate(numeric_column):
         valid_values = df_data_wide[feature].dropna()  # Exclude NaNs for Box-Cox
         transformed, _ = yeojohnson(
             valid_values
         )
         print("transforming", feature)
+        
         if abs(skew(df_data_wide[feature].dropna().tolist())) > abs(skew(transformed)):
-            
             df_data_wide.loc[valid_values.index, feature] = transformed
+        
+        sns.histplot((valid_values - valid_values.mean()) / valid_values.std(), kde=True, ax=axes[i], bins=15, color='red', alpha=0.7)  # Transformed
+        sns.histplot((transformed - transformed.mean()) / transformed.std(), kde=True, ax=axes[i], bins=15, color='blue', alpha=0.4)  # Original
+        axes[i].set_title(f"{feature}\nSK before: {skew(valid_values):.4f}\n SK after: {skew(transformed):.4f}")
+        
+        for j in range(i + 1, len(axes)):
+            axes[j].axis('off')
+
+        plt.tight_layout()
+        plt.savefig("./figures/transformations.png")
+
     return df_data_wide
 
 
@@ -794,7 +811,7 @@ if __name__ == '__main__':
     LOCATION = 'eu'
 
     os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'C:\\Users\\MR\\AppData\\Roaming\\gcloud\\application_default_credentials.json'
-    bq_client = Client(location=LOCATION)
+    bq_client = Client(project=PROJECT_ID, location=LOCATION)
     print('Authenticated! :)')
 
     config_gbq = {
@@ -851,22 +868,29 @@ if __name__ == '__main__':
     def optuna_objective(trial):
         # Define hyperparameters to tune
         latent_dim = trial.suggest_categorical("latent_dim", [8, 16, 32])  # Latent space size
-        layer_sizes = trial.suggest_categorical("layer_sizes", [[64, 32, 16], [32, 16, 10], [128, 64, 32]])  # Layer architectures
+        layer_sizes = trial.suggest_categorical("layer_sizes", [tuple([64, 32, 16]), tuple([32, 16, 10]), tuple([128, 64, 32])])  # Layer architectures
         lr = trial.suggest_loguniform("lr", 1e-4, 1e-2)  # Learning rate
         batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])  # Batch sizes
 
         input_dim = len(df_filled_knn_interp_train.columns)# - 1  # Adjust based on your feature vector size
-        epochs = 30
+        max_epochs = 100
 
         print(f"Creating Autoencoder with {input_dim} input size and layers {layer_sizes}")
-        autoencoder = Autoencoder(input_dim, latent_dim=latent_dim, layer_sizes=layer_sizes, k=400)
+        autoencoder = Autoencoder(input_dim, latent_dim=latent_dim, layer_sizes=list(layer_sizes), k=400)
         criterion = DKNLoss()
         optimizer = optim.Adam(autoencoder.parameters(), lr=lr)
 
         # Dataset and DataLoader
         used_features = df_filled_knn_interp_train.columns
-        icu_dataset = AmsICUSepticShock(df_filled_knn_interp_train[used_features])
-        data_loader = DataLoader(icu_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+        train_icu_dataset = AmsICUSepticShock(df_filled_knn_interp_train[used_features])
+        train_data_loader = DataLoader(train_icu_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+
+        
+        val_icu_dataset = AmsICUSepticShock(df_filled_knn_interp_val[used_features])
+        val_data_loader = DataLoader(val_icu_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+
+        print(f"Train data size: {len(train_icu_dataset)}")
+        print(f"Val dataset size: {len(val_icu_dataset)}")
 
         # Move model to device
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -878,29 +902,47 @@ if __name__ == '__main__':
             autoencoder,
             optimizer,
             criterion,
-            data_loader,
-            epochs=epochs,
-            model_path=f"./models/test_model_{trial.number}.pth",
+            train_data_loader=train_data_loader,
+            val_data_loader=val_data_loader,
+            max_epochs=max_epochs,
+            model_path=f"./models/dkm_model_{trial.number}.pth",
             verbose=False
         )
         # Sample data (replace with actual data)
         train_losses = metrics["train_loss"]  # Example loss values over epochs
+        val_losses = metrics["val_loss"]
 
         # Plot training loss
         plt.figure(figsize=(10, 6))
+        # total loss
         sns.lineplot(x=range(len(train_losses)), y=train_losses, label="Training Loss", linewidth=2)
+        sns.lineplot(x=range(len(val_losses)), y=val_losses, label="Validation Loss", linewidth=2)
+
+        # reconstruction loss
+        sns.lineplot(x=range(len(metrics["train_loss_rec"])), y=metrics["train_loss_rec"], label="Training Loss Rec", linewidth=2)
+        sns.lineplot(x=range(len(metrics["val_loss_rec"])), y=metrics["val_loss_rec"], label="Validation Loss Rec", linewidth=2)
+
+        # cluster loss
+        sns.lineplot(x=range(len(metrics["train_loss_clust"])), y=metrics["train_loss_clust"], label="Training Loss Clust", linewidth=2)
+        sns.lineplot(x=range(len(metrics["val_loss_clust"])), y=metrics["val_loss_clust"], label="Validation Loss Clust", linewidth=2)
+
         plt.title("Training Loss Over Epochs", fontsize=16, fontweight="bold")
         plt.xlabel("Epoch", fontsize=14)
         plt.ylabel("Loss", fontsize=14)
         plt.grid(alpha=0.5)
         plt.legend(fontsize=12)
         plt.tight_layout()
-        plt.savefig(f"./figures/test_model_{trial.number}.png")
+        plt.savefig(f"./figures/dkm_model_{trial.number}.png")
 
-        # Return the final training loss as the objective value
-        return metrics["train_loss"][-1]
+        plt.figure(figsize=(10, 6))
+
+        json.dump(metrics, open(f"./data/dkm_model_{trial.number}_metrics.json", 'w', encoding="utf-8"), indent=4)
+        
+
+        # Return the final training loss as the objective value (validation score!!)
+        return metrics["val_loss"][-1]
     
-    storage = "sqlite:///optuna_study.db"
+    storage = "sqlite:///optuna_study_final.db"
     study = optuna.create_study(
         storage=storage,
         study_name="deep_kmeans_autoencoder",

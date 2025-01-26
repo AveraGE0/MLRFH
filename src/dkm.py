@@ -29,9 +29,10 @@ def g(
     Returns:
         torch.Tensor: Softmax value for index k.
     """
-    distances = torch.cdist(h_x.unsqueeze(0), R.unsqueeze(0)).squeeze(0)  # Pairwise distances, replaces f
-    numerator = torch.exp(-alpha * distances[:, k])
-    denominator = torch.sum(torch.exp(-alpha * distances), dim=1) + 1e-8  # Add epsilon for numerical stability
+    distances = torch.cdist(h_x.unsqueeze(0), R.unsqueeze(0)).squeeze(0)
+    min_dist = torch.min(distances, dim=1, keepdim=True)[0]
+    numerator = torch.exp(-alpha * (distances - min_dist))
+    denominator = torch.sum(numerator, dim=1) + 1e-8
     return numerator / denominator
 
 
@@ -81,6 +82,7 @@ class DKNLoss(nn.Module):
         super().__init__()
         self.lambda_cl = lambda_cl
         self.mse_rec = nn.MSELoss()
+        self.mse_clust = nn.MSELoss()
         self.alpha = alpha
 
     def forward(self, x: torch.Tensor, h_x: torch.Tensor, a_x: torch.Tensor, cluster_centers):
@@ -95,18 +97,40 @@ class DKNLoss(nn.Module):
         loss_reconstr = self.mse_rec(x, a_x)
 
         # Compute soft assignments using G function
-        soft_assignments = torch.stack(
-            [g(k, h_x, self.alpha, cluster_centers) for k in range(cluster_centers.size(0))],
-            dim=1
-        )  # Shape: [batch_size, k]
+        # soft_assignments = torch.stack(
+        #     [g(k, h_x, self.alpha, cluster_centers) for k in range(cluster_centers.size(0))],
+        #     dim=1
+        # )  # Shape: [batch_size, k]
 
-        # Compute weighted cluster centers
-        weighted_centers = torch.matmul(soft_assignments, cluster_centers)  # Shape: [batch_size, latent_size]
+        # # Compute weighted cluster centers
+        # weighted_centers = torch.matmul(soft_assignments, cluster_centers)  # Shape: [batch_size, latent_size]
 
-        # Clustering Loss
-        loss_clustering = self.mse_rec(h_x, weighted_centers)
+        # # Clustering Loss
+        # loss_clustering = self.mse_clust(h_x, weighted_centers)
+        
+        # hard_assignments = torch.argmax(soft_assignments, dim=1)
+        # hard_centers = cluster_centers[hard_assignments]
+        # loss_clustering_hard = self.mse_clust(h_x, hard_centers)
+        
+        # Compute pairwise distances between embeddings and cluster centers
+        distances = torch.cdist(h_x.unsqueeze(0), cluster_centers.unsqueeze(0)).squeeze(0)  # Shape: [batch_size, n_clusters]
 
-        return loss_reconstr + self.lambda_cl * loss_clustering
+        # Compute soft assignments using G function (softmax with alpha)
+        #min_dist = torch.min(distances, dim=1, keepdim=True)[0]
+        numerator = torch.exp(-self.alpha * (distances))
+        denominator = torch.sum(numerator, dim=1, keepdim=True) + 1e-8  # Shape: [batch_size, 1]
+        soft_assignments = numerator / denominator  # Shape: [batch_size, n_clusters]
+
+        # Step 3: Compute weighted distances (element-wise product of distances and soft assignments)
+        weighted_distances = distances * soft_assignments  # Shape: [batch_size, n_clusters]
+
+        # Step 4: Sum weighted distances across clusters for each data point
+        sum_weighted_distances = torch.sum(weighted_distances, dim=1)  # Shape: [batch_size]
+
+        # Step 5: Compute clustering loss as the mean of these sums
+        loss_clustering = torch.mean(sum_weighted_distances)  # Scalar
+
+        return loss_reconstr + self.lambda_cl * loss_clustering, loss_reconstr, loss_clustering
 
 
 
@@ -114,11 +138,13 @@ def training(
         autoencoder: nn.Module,
         optimizer,
         criterion: nn.Module,
-        data_loader: DataLoader,
-        epochs: int,
+        train_data_loader: DataLoader,
+        val_data_loader: DataLoader,
         model_path: Path,
-        alpha_init=1.0,
+        alpha_init=0.05,
         alpha_final=100.0,
+        max_epochs: int=100,
+        pretrain_epochs=30,
         verbose=True
     ) -> dict:
     if not str(model_path).endswith(".pth"):
@@ -126,38 +152,137 @@ def training(
 
     # Tracked metrics
     train_losses = []
+    train_losses_clust = []
+    train_losses_rec = []
+
+    val_losses = []
+    val_losses_rec = []
+    val_losses_clust = []
+
+    # pretraining
+    pretrain_optimizer = torch.optim.Adam(autoencoder.parameters(), lr=0.001)  # Pretraining optimizer
+    pretrain_criterion = torch.nn.MSELoss()  # Reconstruction loss for pretraining
+
+    print("Starting pretraining...")
+    for epoch in range(pretrain_epochs):
+        autoencoder.train()
+        epoch_pretrain_loss = 0
+
+        for batch in tqdm(train_data_loader, desc=f"Pretrain Epoch {epoch + 1}/{pretrain_epochs}"):
+            pretrain_optimizer.zero_grad()
+            batch = batch.to(next(autoencoder.parameters()).device)
+            # Forward pass
+            reconstructed, _ = autoencoder(batch)
+            # Compute reconstruction loss
+            loss = pretrain_criterion(reconstructed, batch)
+            loss.backward()
+            pretrain_optimizer.step()
+            epoch_pretrain_loss += loss.item()
+
+        epoch_pretrain_loss /= len(train_data_loader)
+
+        if verbose:
+            print(f"Pretraining Epoch {epoch + 1}, Reconstruction Loss: {epoch_pretrain_loss}")
+
+    print("Pretraining completed. Proceeding to full training...")
 
     alpha = alpha_init
-    alpha_step = (alpha_final - alpha_init) / epochs
 
-    for epoch in range(epochs):
+    early_stopping_patience: int = 5
+    delta: float = 0.0        # Minimum change in loss to qualify as improvement
+    best_loss = float('inf')
+    epochs_without_improvement = 0
+
+    for epoch in range(max_epochs):
         autoencoder.train()
-        train_loss = 0
+        epoch_train_loss = 0
+        epoch_train_loss_rec = 0
+        epoch_train_loss_clust = 0
 
-        for batch in tqdm(data_loader, desc=f"Epoch {epoch + 1}/{epochs}"):
+        criterion.alpha = alpha
+
+        autoencoder.train()
+        for batch in tqdm(train_data_loader, desc=f"Epoch {epoch + 1}/{max_epochs}"):
             optimizer.zero_grad()
             batch = batch.to(next(autoencoder.parameters()).device)
             # Forward pass
             reconstructed, latents = autoencoder(batch)
-            criterion.alpha = alpha
-            loss = criterion(batch, latents, reconstructed, autoencoder.cluster_centers)
             
-            loss.backward()
+            total_train_loss, loss_train_rec, loss_train_clust = criterion(batch, latents, reconstructed, autoencoder.cluster_centers)
+            
+            total_train_loss.backward()
             optimizer.step()
-            train_loss += loss.item()
+            epoch_train_loss += total_train_loss.item()
+            epoch_train_loss_rec += loss_train_rec.item()
+            epoch_train_loss_clust += loss_train_clust.item()
 
-        train_loss /= len(data_loader)  # Average training loss for the epoch
-        train_losses.append(train_loss)
+        # Average training loss for the epoch
+        epoch_train_loss /= len(train_data_loader)
+        epoch_train_loss_rec /= len(train_data_loader)
+        epoch_train_loss_clust /= len(train_data_loader)
+
+        train_losses.append(epoch_train_loss)
+        train_losses_rec.append(epoch_train_loss_rec)
+        train_losses_clust.append(epoch_train_loss_clust)
+
+        # Validation phase
+        autoencoder.eval()  # Set to evaluation mode
+        epoch_val_loss = 0
+        epoch_val_loss_rec = 0
+        epoch_val_loss_clust = 0
+
+        with torch.no_grad():  # No gradient computation during validation
+            for batch in val_data_loader:
+                batch = batch.to(next(autoencoder.parameters()).device)
+                reconstructed, latents = autoencoder(batch)
+                total_val_loss, loss_val_rec, loss_val_clust = criterion(batch, latents, reconstructed, autoencoder.cluster_centers)
+                
+                epoch_val_loss += total_val_loss.item()
+                epoch_val_loss_rec += loss_val_rec.item()
+                epoch_val_loss_clust += loss_val_clust.item()
+
+
+        epoch_val_loss /= len(val_data_loader)
+        epoch_val_loss_rec /= len(val_data_loader)
+        epoch_val_loss_clust /= len(val_data_loader)
+
+        val_losses.append(epoch_val_loss)
+        val_losses_rec.append(epoch_val_loss_rec)
+        val_losses_clust.append(epoch_val_loss_clust)
 
         if verbose:
-            print(f"Epoch {epoch + 1}, Loss: {train_loss}")
+            print(f"Validation Loss: {epoch_val_loss}")
+            print(f"Epoch {epoch + 1}, Loss: {epoch_train_loss}")
 
-        alpha += alpha_step
+        # Early stopping logic
+        if epoch_val_loss < best_loss - delta:
+            best_loss = epoch_val_loss
+            epochs_without_improvement = 0  # Reset counter
+            # Save the best model
+            torch.save(autoencoder.state_dict(), model_path)
+            if verbose:
+                print(f"Model improved, saving best model at epoch {epoch + 1}")
+        else:
+            epochs_without_improvement += 1
+            if verbose:
+                print(f"No improvement for {epochs_without_improvement} epoch(s).")
+            if epochs_without_improvement >= early_stopping_patience:
+                if verbose:
+                    print("Early stopping triggered.")
+                break
+        
+        n = max(epoch, 2)
+        alpha = min(2**(1/np.log(n)**2) * alpha, alpha_final)
 
         # Save the trained model
-        print("Saving model")
-        torch.save(autoencoder.state_dict(), model_path)
+        #print("Saving model")
+        #torch.save(autoencoder.state_dict(), model_path)
 
     return {
-        "train_loss": train_losses
+        "train_loss": train_losses,
+        "train_loss_rec": train_losses_rec,
+        "train_loss_clust": train_losses_clust,
+        "val_loss": val_losses,
+        "val_loss_rec": val_losses_rec,
+        "val_loss_clust": val_losses_clust
     }
