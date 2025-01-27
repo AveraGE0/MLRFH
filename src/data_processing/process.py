@@ -338,7 +338,7 @@ def get_windowed_data(df_data, time_window: str='12h'):
 
 
 
-def transform_data(df_data_wide: pd.DataFrame, ignore_columns: list):
+def transform_data(df_data_wide: pd.DataFrame, ignore_columns: list, default_path="."):
     """Performs a box-cox transformation of the data.
 
     Args:
@@ -374,7 +374,7 @@ def transform_data(df_data_wide: pd.DataFrame, ignore_columns: list):
             axes[j].axis('off')
 
         plt.tight_layout()
-        plt.savefig("./figures/transformations.png")
+        plt.savefig(f"{default_path}/figures/transformations.png")
 
     return df_data_wide
 
@@ -698,7 +698,7 @@ def process_data(PROJECT_ID: str, config_gbq: dict, bq_client: Client=None, defa
     
     trans_ignore_cols = ["index", "Gender", "ventilatory_support", "seq_id"]
     # Transforming data with box-cox
-    df_more_normal = transform_data(df_sepsis_windows, ignore_columns=trans_ignore_cols)
+    df_more_normal = transform_data(df_sepsis_windows, ignore_columns=trans_ignore_cols, default_path=default_path)
     
     # Standardizing data for imputation and clustering
     df_standardized = standardize_data(df_more_normal, ignore_columns=trans_ignore_cols)
